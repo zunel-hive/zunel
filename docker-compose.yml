@@ -1,0 +1,40 @@
+x-common-config: &common-config
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: zunel
+  volumes:
+    - ~/.zunel:/home/zunel/.zunel
+  cap_drop:
+    - ALL
+  cap_add:
+    - SYS_ADMIN
+  security_opt:
+    - apparmor=unconfined
+    - seccomp=unconfined
+
+services:
+  zunel-gateway:
+    container_name: zunel-gateway
+    <<: *common-config
+    command: ["gateway"]
+    restart: unless-stopped
+    ports:
+      - 18790:18790
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  zunel-cli:
+    container_name: zunel-cli
+    <<: *common-config
+    profiles:
+      - cli
+    command: ["status"]
+    stdin_open: true
+    tty: true
