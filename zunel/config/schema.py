@@ -169,6 +169,13 @@ class MCPServerConfig(Base):
     headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
     tool_timeout: int = 30  # seconds before a tool call is cancelled
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
+    oauth: bool = False  # Use MCP OAuth 2.1 (DCR + PKCE) instead of static bearer headers
+    oauth_scope: str | None = None  # Optional scope string requested during OAuth authorization
+    oauth_callback_host: str = "127.0.0.1"  # Local bind host for the OAuth redirect listener
+    oauth_callback_port: int = 33418  # Local bind port for the OAuth redirect listener
+    oauth_client_id: str | None = None  # Pre-registered OAuth client_id (skip DCR when set, e.g. Slack hosted MCP)
+    oauth_client_secret: str | None = None  # Optional pre-registered OAuth client_secret (confidential clients)
+    oauth_redirect_uri: str | None = None  # Override the loopback redirect URI (must match what the pre-registered client expects)
 
 class MyToolConfig(Base):
     """Self-inspection tool configuration."""

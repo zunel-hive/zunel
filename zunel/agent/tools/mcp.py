@@ -503,6 +503,16 @@ async def connect_mcp_servers(
                 read, write = await server_stack.enter_async_context(stdio_client(params))
             elif transport_type == "sse":
                 cfg_headers = _expand_headers(cfg.headers)
+                oauth_auth: httpx.Auth | None = None
+                if getattr(cfg, "oauth", False):
+                    from zunel.agent.tools.mcp_oauth import (
+                        build_settings_from_cfg,
+                        make_oauth_provider,
+                    )
+
+                    oauth_auth = make_oauth_provider(
+                        cfg.url, build_settings_from_cfg(name, cfg)
+                    )
 
                 def httpx_client_factory(
                     headers: dict[str, str] | None = None,
@@ -518,18 +528,29 @@ async def connect_mcp_servers(
                         headers=merged_headers or None,
                         follow_redirects=True,
                         timeout=timeout,
-                        auth=auth,
+                        auth=auth or oauth_auth,
                     )
 
                 read, write = await server_stack.enter_async_context(
                     sse_client(cfg.url, httpx_client_factory=httpx_client_factory)
                 )
             elif transport_type == "streamableHttp":
+                http_auth: httpx.Auth | None = None
+                if getattr(cfg, "oauth", False):
+                    from zunel.agent.tools.mcp_oauth import (
+                        build_settings_from_cfg,
+                        make_oauth_provider,
+                    )
+
+                    http_auth = make_oauth_provider(
+                        cfg.url, build_settings_from_cfg(name, cfg)
+                    )
                 http_client = await server_stack.enter_async_context(
                     httpx.AsyncClient(
                         headers=_expand_headers(cfg.headers) or None,
                         follow_redirects=True,
                         timeout=None,
+                        auth=http_auth,
                     )
                 )
                 read, write, _ = await server_stack.enter_async_context(

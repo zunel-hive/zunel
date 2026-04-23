@@ -1039,6 +1039,101 @@ def channels_status(
 
 
 # ============================================================================
+# MCP Commands
+# ============================================================================
+
+
+mcp_app = typer.Typer(help="Manage MCP servers")
+app.add_typer(mcp_app, name="mcp")
+
+
+@mcp_app.command("login")
+def mcp_login(
+    server: str = typer.Argument(..., help="MCP server name (key under tools.mcpServers)"),
+    config_path: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+) -> None:
+    """Authenticate an OAuth-enabled MCP server and cache its refresh token.
+
+    This triggers the OAuth 2.1 authorization-code + PKCE flow (opening a
+    browser) and stores the resulting tokens under ``~/.zunel/oauth/<server>/``.
+    Subsequent ``zunel agent`` and ``zunel gateway`` runs reuse the cached
+    tokens and refresh them automatically.
+    """
+    import asyncio as _asyncio
+
+    from zunel.agent.tools.mcp_oauth import build_settings_from_cfg, make_oauth_provider
+    from zunel.config.loader import load_config, set_config_path
+
+    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else None
+    if resolved_config_path is not None:
+        set_config_path(resolved_config_path)
+    config = load_config(resolved_config_path)
+
+    cfg = config.tools.mcp_servers.get(server)
+    if cfg is None:
+        console.print(f"[red]✗[/red] Unknown MCP server: {server!r}")
+        raise typer.Exit(code=2)
+    if not getattr(cfg, "oauth", False):
+        console.print(
+            f"[yellow]![/yellow] MCP server {server!r} has oauth=false; "
+            "set it to true in ~/.zunel/config.json first."
+        )
+        raise typer.Exit(code=2)
+    if not cfg.url:
+        console.print(f"[red]✗[/red] MCP server {server!r} has no URL configured.")
+        raise typer.Exit(code=2)
+
+    settings = build_settings_from_cfg(server, cfg)
+    provider = make_oauth_provider(cfg.url, settings)
+
+    async def _login() -> None:
+        import httpx
+
+        tokens_path = settings.storage_dir / server / "tokens.json"
+        console.print(
+            f"{__logo__} OAuth login for [cyan]{server}[/cyan]\n"
+            f"  URL: {cfg.url}\n"
+            f"  Redirect: {settings.redirect_uri}\n"
+            f"  Tokens: {settings.storage_dir / server}\n"
+        )
+
+        # The probe's only job is to trigger the auth flow via a 401 so the
+        # OAuthClientProvider runs the redirect/callback legs. Some MCP servers
+        # (SSE in particular) keep the response open indefinitely once
+        # authorized, so we cap the read with a short timeout and accept
+        # "tokens on disk" as proof the flow completed.
+        timeout = httpx.Timeout(connect=15.0, read=10.0, write=10.0, pool=10.0)
+        async with httpx.AsyncClient(auth=provider, follow_redirects=True, timeout=timeout) as client:
+            status_code: int | None = None
+            probe_error: Exception | None = None
+            try:
+                response = await client.get(cfg.url, headers={"Accept": "application/json"})
+                status_code = response.status_code
+            except (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                probe_error = exc
+            except httpx.HTTPError as exc:
+                probe_error = exc
+
+        if tokens_path.exists():
+            suffix = (
+                f" (server responded {status_code})"
+                if status_code is not None
+                else " (probe bounded by timeout; auth already completed)"
+            )
+            console.print(f"[green]✓[/green] Tokens cached at {tokens_path}.{suffix}")
+            return
+
+        console.print(
+            f"[red]✗[/red] OAuth login did not produce tokens at {tokens_path}."
+        )
+        if probe_error is not None:
+            console.print(f"[dim]Probe error: {probe_error}[/dim]")
+        raise typer.Exit(code=1)
+
+    _asyncio.run(_login())
+
+
+# ============================================================================
 # Status Commands
 # ============================================================================
 

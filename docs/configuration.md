@@ -432,6 +432,53 @@ Unknown variables expand to an empty string and log a warning. Use the
 `${VAR}` form only — bare `$VAR` is left as-is so raw `$` characters in
 tokens pass through untouched.
 
+### MCP OAuth (2.1 + PKCE + Dynamic Client Registration)
+
+Some MCP servers (for example Atlassian and Glean) refuse static API tokens
+and require OAuth. Opt a server into zunel's OAuth flow with `oauth: true`:
+
+```json
+{
+  "tools": {
+    "mcpServers": {
+      "atlassian-jira": {
+        "type": "streamableHttp",
+        "url": "https://mcp.atlassian.com/v1/mcp",
+        "oauth": true
+      },
+      "glean_default": {
+        "type": "sse",
+        "url": "https://<tenant>.glean.com/mcp/default",
+        "oauth": true
+      }
+    }
+  }
+}
+```
+
+Then pre-authenticate once from the CLI:
+
+```bash
+zunel mcp login atlassian-jira
+zunel mcp login glean_default
+```
+
+The command opens a browser, runs OAuth 2.1 authorization-code + PKCE (with
+Dynamic Client Registration when the server supports it), and caches the
+resulting access + refresh tokens at `~/.zunel/oauth/<server>/`. Subsequent
+`zunel agent` and `zunel gateway` runs reuse and auto-refresh those tokens.
+
+Additional per-server knobs:
+
+| Field | Meaning |
+|-------|---------|
+| `oauth` | Enable OAuth auth (default `false`) |
+| `oauthScope` | Optional scope string requested during authorization |
+| `oauthCallbackHost` | Localhost bind address for the redirect listener (default `127.0.0.1`) |
+| `oauthCallbackPort` | Port for the redirect listener (default `33418`) |
+
+`headers` is ignored when `oauth` is true — tokens are injected automatically.
+
 ## Security
 
 The main security switches live under `tools`:

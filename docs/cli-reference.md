@@ -22,6 +22,7 @@ the local CLI workflow and the Slack-backed gateway.
 | `zunel gateway --config <config>` | Start a specific gateway instance |
 | `zunel status` | Show provider, model, and workspace status |
 | `zunel channels status` | Show channel status |
+| `zunel mcp login <server>` | Run the OAuth flow for an MCP server and cache tokens |
 
 ## Interactive Exit Shortcuts
 
