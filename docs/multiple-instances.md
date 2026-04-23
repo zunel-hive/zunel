@@ -35,8 +35,8 @@ zunel agent --config ~/.zunel-local/config.json
 # Main Slack gateway
 zunel gateway --config ~/.zunel-slack/config.json
 
-# Second gateway on a different health port
-zunel gateway --config ~/.zunel-staging/config.json --port 18791
+# Second gateway against a different workspace / Slack app
+zunel gateway --config ~/.zunel-staging/config.json
 ```
 
 `zunel agent` always starts a local agent loop. It does not attach to a running
@@ -79,10 +79,6 @@ Each instance can point to a different model, endpoint, workspace, or Slack app:
       "appToken": "xapp-...",
       "allowFrom": ["*"]
     }
-  },
-  "gateway": {
-    "host": "127.0.0.1",
-    "port": 18790
   }
 }
 ```
@@ -94,7 +90,7 @@ config:
 
 ```bash
 zunel agent --config ~/.zunel-local/config.json --workspace /tmp/zunel-local-test
-zunel gateway --config ~/.zunel-staging/config.json --workspace /tmp/zunel-staging-test --port 18792
+zunel gateway --config ~/.zunel-staging/config.json --workspace /tmp/zunel-staging-test
 ```
 
 ## Common Uses
@@ -106,7 +102,9 @@ zunel gateway --config ~/.zunel-staging/config.json --workspace /tmp/zunel-stagi
 
 ## Notes
 
-- Run each gateway on a different `--port` if they are active at the same time.
 - Keep each instance on its own workspace if you want isolated sessions and memory.
+- Each gateway must use distinct Slack credentials (`botToken` / `appToken`) if
+  you run them at the same time.
 - Empty Slack `allowFrom` lists deny access; use explicit IDs or `["*"]`.
-- `GET /health` responds on the configured gateway host and port.
+- The gateway does not bind a port. If you need a liveness check, use your
+  process supervisor (systemd, Docker, launchd).

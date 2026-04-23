@@ -20,7 +20,6 @@ the local CLI workflow and the Slack-backed gateway.
 | `zunel agent --logs` | Show runtime logs during chat |
 | `zunel gateway` | Start the Slack-backed gateway |
 | `zunel gateway --config <config>` | Start a specific gateway instance |
-| `zunel gateway --port 18791` | Override the health endpoint port |
 | `zunel status` | Show provider, model, and workspace status |
 | `zunel channels status` | Show channel status |
 

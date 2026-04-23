@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import shutil
 from contextlib import AsyncExitStack
 from typing import Any
@@ -32,6 +33,39 @@ _WINDOWS_SHELL_LAUNCHERS: frozenset[str] = frozenset(("npx", "npm", "pnpm", "yar
 def _is_transient(exc: BaseException) -> bool:
     """Check if an exception looks like a transient connection error."""
     return type(exc).__name__ in _TRANSIENT_EXC_NAMES
+
+
+_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_env_refs(value: str) -> str:
+    """Expand ``${VAR}`` references against the current process environment.
+
+    Only the ``${VAR}`` form is expanded so that raw ``$`` characters in
+    tokens are left untouched. Unknown variables are replaced with the empty
+    string and a warning is logged once per missing name.
+    """
+    missing: set[str] = set()
+
+    def _sub(match: re.Match[str]) -> str:
+        name = match.group(1)
+        env_value = os.environ.get(name)
+        if env_value is None:
+            missing.add(name)
+            return ""
+        return env_value
+
+    result = _ENV_REF_RE.sub(_sub, value)
+    for name in sorted(missing):
+        logger.warning("MCP config references ${{{}}} but that env var is not set", name)
+    return result
+
+
+def _expand_headers(headers: dict[str, str] | None) -> dict[str, str] | None:
+    """Return a copy of ``headers`` with ``${VAR}`` references expanded."""
+    if not headers:
+        return headers
+    return {k: _expand_env_refs(v) for k, v in headers.items()}
 
 
 def _windows_command_basename(command: str) -> str:
@@ -468,6 +502,7 @@ async def connect_mcp_servers(
                 )
                 read, write = await server_stack.enter_async_context(stdio_client(params))
             elif transport_type == "sse":
+                cfg_headers = _expand_headers(cfg.headers)
 
                 def httpx_client_factory(
                     headers: dict[str, str] | None = None,
@@ -476,7 +511,7 @@ async def connect_mcp_servers(
                 ) -> httpx.AsyncClient:
                     merged_headers = {
                         "Accept": "application/json, text/event-stream",
-                        **(cfg.headers or {}),
+                        **(cfg_headers or {}),
                         **(headers or {}),
                     }
                     return httpx.AsyncClient(
@@ -492,7 +527,7 @@ async def connect_mcp_servers(
             elif transport_type == "streamableHttp":
                 http_client = await server_stack.enter_async_context(
                     httpx.AsyncClient(
-                        headers=cfg.headers or None,
+                        headers=_expand_headers(cfg.headers) or None,
                         follow_redirects=True,
                         timeout=None,
                     )

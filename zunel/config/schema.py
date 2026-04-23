@@ -119,10 +119,13 @@ class HeartbeatConfig(Base):
 
 
 class GatewayConfig(Base):
-    """Gateway/server configuration."""
+    """Gateway/server configuration.
 
-    host: str = "127.0.0.1"  # Safer default: local-only bind.
-    port: int = 18790
+    The gateway only runs in-process services (Slack channels, cron, Dream,
+    heartbeat). It does not bind any network port; the only user-facing
+    surfaces are the Slack channel and the ``zunel`` CLI.
+    """
+
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 

@@ -30,7 +30,5 @@ RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/ent
 USER zunel
 ENV HOME=/home/zunel
 
-EXPOSE 18790
-
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["status"]

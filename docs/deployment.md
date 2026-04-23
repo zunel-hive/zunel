@@ -46,7 +46,7 @@ docker run -v ~/.zunel:/home/zunel/.zunel --rm zunel onboard
 $EDITOR ~/.zunel/config.json
 
 # Start the Slack gateway
-docker run -v ~/.zunel:/home/zunel/.zunel -p 18790:18790 zunel gateway
+docker run -v ~/.zunel:/home/zunel/.zunel zunel gateway
 
 # Run one-off CLI commands
 docker run -v ~/.zunel:/home/zunel/.zunel --rm zunel agent -m "Hello!"
@@ -62,15 +62,18 @@ docker run -v ~/.zunel:/home/zunel/.zunel --rm zunel status
 > `sudo chown -R 1000:1000 ~/.zunel` or run the container as your own UID with
 > `--user $(id -u):$(id -g)`. Podman users can use `--userns=keep-id`.
 
-## Health Endpoint
+## Communication Surfaces
 
-`zunel gateway` exposes a lightweight health endpoint on `gateway.host` and
-`gateway.port`:
+`zunel gateway` does not bind any network port. The only ways to talk to a
+running gateway are:
 
-- `GET /health` returns `{"status":"ok"}`
-- other paths return `404`
+- the **Slack channel** configured under `channels.slack` (if enabled)
+- the **`zunel` CLI** on the same host against the same `--config` /
+  `--workspace`
 
-By default the gateway binds to `127.0.0.1:18790`, so the endpoint stays local.
+There is no HTTP server, health endpoint, or webhook listener. If you need a
+liveness signal, use the process supervisor (systemd, Docker, launchd) — if
+`zunel gateway` is running, the services are up.
 
 ## Linux Service
 

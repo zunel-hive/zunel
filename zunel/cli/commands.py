@@ -509,7 +509,6 @@ def _migrate_cron_store(config: "Config") -> None:
 
 @app.command()
 def gateway(
-    port: int | None = typer.Option(None, "--port", "-p", help="Gateway port"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
@@ -520,14 +519,10 @@ def gateway(
 
         logging.basicConfig(level=logging.DEBUG)
     cfg = _load_runtime_config(config, workspace)
-    _run_gateway(cfg, port=port)
+    _run_gateway(cfg)
 
 
-def _run_gateway(
-    config: Config,
-    *,
-    port: int | None = None,
-) -> None:
+def _run_gateway(config: Config) -> None:
     """Shared gateway runtime that boots channels (Slack), cron, and heartbeat."""
     from zunel.agent.loop import AgentLoop
     from zunel.bus.queue import MessageBus
@@ -537,9 +532,7 @@ def _run_gateway(
     from zunel.heartbeat.service import HeartbeatService
     from zunel.session.manager import SessionManager
 
-    port = port if port is not None else config.gateway.port
-
-    console.print(f"{__logo__} Starting zunel gateway version {__version__} on port {port}...")
+    console.print(f"{__logo__} Starting zunel gateway version {__version__}...")
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
@@ -714,48 +707,6 @@ def _run_gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
-    async def _health_server(host: str, health_port: int):
-        """Lightweight HTTP health endpoint on the gateway port."""
-        import json as _json
-
-        async def handle(reader, writer):
-            try:
-                data = await asyncio.wait_for(reader.read(4096), timeout=5)
-            except (asyncio.TimeoutError, ConnectionError):
-                writer.close()
-                return
-
-            request_line = data.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
-            method, path = "", ""
-            parts = request_line.split(" ")
-            if len(parts) >= 2:
-                method, path = parts[0], parts[1]
-
-            if method == "GET" and path == "/health":
-                body = _json.dumps({"status": "ok"})
-                resp = (
-                    f"HTTP/1.0 200 OK\r\n"
-                    f"Content-Type: application/json\r\n"
-                    f"Content-Length: {len(body)}\r\n"
-                    f"\r\n{body}"
-                )
-            else:
-                body = "Not Found"
-                resp = (
-                    f"HTTP/1.0 404 Not Found\r\n"
-                    f"Content-Type: text/plain\r\n"
-                    f"Content-Length: {len(body)}\r\n"
-                    f"\r\n{body}"
-                )
-
-            writer.write(resp.encode())
-            await writer.drain()
-            writer.close()
-
-        server = await asyncio.start_server(handle, host, health_port)
-        console.print(f"[green]✓[/green] Health endpoint: http://{host}:{health_port}/health")
-        async with server:
-            await server.serve_forever()
     # Register Dream system job (always-on, idempotent on restart)
     dream_cfg = config.agents.defaults.dream
     if dream_cfg.model_override:
@@ -779,7 +730,6 @@ def _run_gateway(
             tasks = [
                 agent.run(),
                 channels.start_all(),
-                _health_server(config.gateway.host, port),
             ]
             await asyncio.gather(*tasks)
         except KeyboardInterrupt:

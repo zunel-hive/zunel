@@ -287,13 +287,13 @@ Important behavior:
 
 ## Gateway Configuration
 
-`zunel gateway` uses the `gateway` block:
+`zunel gateway` runs the in-process services (Slack channel, cron, Dream,
+heartbeat). It does not bind any network port — communication happens over
+Slack or the local `zunel` CLI. The `gateway` block only tunes the heartbeat:
 
 ```json
 {
   "gateway": {
-    "host": "127.0.0.1",
-    "port": 18790,
     "heartbeat": {
       "enabled": true,
       "intervalS": 1800,
@@ -305,8 +305,6 @@ Important behavior:
 
 | Field | Meaning |
 |-------|---------|
-| `host` | Bind host for the health endpoint |
-| `port` | Health endpoint port |
 | `heartbeat.enabled` | Whether heartbeat runs |
 | `heartbeat.intervalS` | Heartbeat interval in seconds |
 | `heartbeat.keepRecentMessages` | Recent message count kept around heartbeat runs |
@@ -418,6 +416,21 @@ Supported fields:
 | `url` / `headers` | Remote HTTP or SSE MCP server |
 | `toolTimeout` | Per-tool timeout in seconds |
 | `enabledTools` | Allow all tools, none, or a named subset |
+
+Header values support `${VAR}` substitution against the process environment,
+so you can keep secrets out of `config.json`:
+
+```json
+{
+  "headers": {
+    "Authorization": "Bearer ${ATLASSIAN_MCP_TOKEN}"
+  }
+}
+```
+
+Unknown variables expand to an empty string and log a warning. Use the
+`${VAR}` form only — bare `$VAR` is left as-is so raw `$` characters in
+tokens pass through untouched.
 
 ## Security
 
