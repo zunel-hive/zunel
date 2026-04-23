@@ -447,7 +447,7 @@ and require OAuth. Opt a server into zunel's OAuth flow with `oauth: true`:
         "oauth": true
       },
       "glean_default": {
-        "type": "sse",
+        "type": "streamableHttp",
         "url": "https://<tenant>.glean.com/mcp/default",
         "oauth": true
       }
@@ -476,8 +476,11 @@ Additional per-server knobs:
 | `oauthScope` | Optional scope string requested during authorization |
 | `oauthCallbackHost` | Localhost bind address for the redirect listener (default `127.0.0.1`) |
 | `oauthCallbackPort` | Port for the redirect listener (default `33418`) |
+| `initTimeout` | Seconds to wait for `initialize`/`list_tools`/etc. before giving up on a server (default `15`). A hung server is logged and skipped; healthy servers still register. |
 
 `headers` is ignored when `oauth` is true — tokens are injected automatically.
+
+> **Glean tip:** Glean's hosted MCP is **streamable-HTTP**. Using `type: "sse"` opens a stream that never sends an `endpoint` event, causing `initialize` to hang until the init timeout trips. Configure it as `type: "streamableHttp"`.
 
 ## Security
 
