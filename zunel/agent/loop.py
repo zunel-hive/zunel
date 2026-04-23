@@ -796,6 +796,7 @@ class AgentLoop:
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
+        turn_started_at = time.perf_counter()
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
@@ -873,7 +874,7 @@ class AgentLoop:
             self.sessions.save(session)
             user_persisted_early = True
 
-        final_content, _, all_msgs, stop_reason, had_injections = await self._run_agent_loop(
+        final_content, tools_used, all_msgs, stop_reason, had_injections = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
             on_stream=on_stream,
@@ -909,6 +910,31 @@ class AgentLoop:
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+
+        total_ms = (time.perf_counter() - turn_started_at) * 1000
+        usage = dict(self._last_usage or {})
+        tool_counts: dict[str, int] = {}
+        for name in tools_used or []:
+            tool_counts[name] = tool_counts.get(name, 0) + 1
+        tool_summary = (
+            ",".join(f"{n}x{c}" for n, c in sorted(tool_counts.items()))
+            if tool_counts
+            else "none"
+        )
+        logger.info(
+            "Turn metrics channel={} sender={} total_ms={:.0f} tool_calls={} tools=[{}] "
+            "prompt_tokens={} completion_tokens={} cached_tokens={} stop={} chars={}",
+            msg.channel,
+            msg.sender_id,
+            total_ms,
+            len(tools_used or []),
+            tool_summary,
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
+            usage.get("cached_tokens", 0),
+            stop_reason,
+            len(final_content or ""),
+        )
 
         meta = dict(msg.metadata or {})
         if on_stream is not None and stop_reason != "error":

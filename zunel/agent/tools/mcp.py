@@ -562,9 +562,44 @@ async def connect_mcp_servers(
                 return name, None
 
             session = await server_stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
+            init_timeout = max(1, getattr(cfg, "init_timeout", 15))
 
-            tools = await session.list_tools()
+            async def _bounded_close() -> None:
+                """Close the server stack without blocking the rest of startup.
+
+                Some MCP transports (notably SSE) don't honour cancellation
+                cleanly, so aclose() can hang just like the call that timed
+                out. A short budget keeps pathological servers from blocking
+                the agent loop start even in the inner-timeout path.
+                """
+                try:
+                    await asyncio.wait_for(server_stack.aclose(), timeout=2.0)
+                except (asyncio.TimeoutError, Exception) as close_exc:
+                    logger.debug(
+                        "MCP server '{}': aclose() did not complete cleanly: {}",
+                        name, close_exc,
+                    )
+
+            try:
+                await asyncio.wait_for(session.initialize(), timeout=init_timeout)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "MCP server '{}': initialize() timed out after {}s; skipping. "
+                    "Increase tools.mcpServers.{}.initTimeout or remove the server if unreachable.",
+                    name, init_timeout, name,
+                )
+                await _bounded_close()
+                return name, None
+
+            try:
+                tools = await asyncio.wait_for(session.list_tools(), timeout=init_timeout)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "MCP server '{}': list_tools() timed out after {}s; skipping.",
+                    name, init_timeout,
+                )
+                await _bounded_close()
+                return name, None
             enabled_tools = set(cfg.enabled_tools)
             allow_all_tools = "*" in enabled_tools
             registered_count = 0
@@ -607,7 +642,9 @@ async def connect_mcp_servers(
                     )
 
             try:
-                resources_result = await session.list_resources()
+                resources_result = await asyncio.wait_for(
+                    session.list_resources(), timeout=init_timeout
+                )
                 for resource in resources_result.resources:
                     wrapper = MCPResourceWrapper(
                         session, name, resource, resource_timeout=cfg.tool_timeout
@@ -617,11 +654,18 @@ async def connect_mcp_servers(
                     logger.debug(
                         "MCP: registered resource '{}' from server '{}'", wrapper.name, name
                     )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "MCP server '{}': list_resources() timed out after {}s; continuing without resources.",
+                    name, init_timeout,
+                )
             except Exception as e:
                 logger.debug("MCP server '{}': resources not supported or failed: {}", name, e)
 
             try:
-                prompts_result = await session.list_prompts()
+                prompts_result = await asyncio.wait_for(
+                    session.list_prompts(), timeout=init_timeout
+                )
                 for prompt in prompts_result.prompts:
                     wrapper = MCPPromptWrapper(
                         session, name, prompt, prompt_timeout=cfg.tool_timeout
@@ -629,6 +673,11 @@ async def connect_mcp_servers(
                     registry.register(wrapper)
                     registered_count += 1
                     logger.debug("MCP: registered prompt '{}' from server '{}'", wrapper.name, name)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "MCP server '{}': list_prompts() timed out after {}s; continuing without prompts.",
+                    name, init_timeout,
+                )
             except Exception as e:
                 logger.debug("MCP server '{}': prompts not supported or failed: {}", name, e)
 
@@ -663,19 +712,69 @@ async def connect_mcp_servers(
 
     server_stacks: dict[str, AsyncExitStack] = {}
 
-    tasks: list[asyncio.Task] = []
+    if not mcp_servers:
+        return server_stacks
+
+    # Track each task by name so we can report progress and still cancel any
+    # task that somehow slips past the per-call timeouts inside
+    # connect_single_server (e.g. a transport that hangs before session
+    # initialization runs). Without this outer bound a single hung server
+    # would prevent the agent loop from starting at all.
+    tasks: dict[asyncio.Task, str] = {}
     for name, cfg in mcp_servers.items():
         task = asyncio.create_task(connect_single_server(name, cfg))
-        tasks.append(task)
+        tasks[task] = name
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # The tightest per-call init timeout, plus some slack for transport setup.
+    # connect_single_server runs initialize/list_tools/list_resources/list_prompts
+    # sequentially, each bounded by init_timeout, so the worst case per server
+    # is roughly 4 * init_timeout.
+    per_server_budget = max(
+        (getattr(cfg, "init_timeout", 15) for cfg in mcp_servers.values()),
+        default=15,
+    )
+    outer_budget = max(30, per_server_budget * 4 + 10)
 
-    for i, result in enumerate(results):
-        name = list(mcp_servers.keys())[i]
-        if isinstance(result, BaseException):
-            if not isinstance(result, asyncio.CancelledError):
-                logger.error("MCP server '{}' connection task failed: {}", name, result)
-        elif result is not None and result[1] is not None:
+    start = asyncio.get_event_loop().time()
+    budget_exhausted = False
+    for future in asyncio.as_completed(tasks.keys(), timeout=outer_budget):
+        try:
+            result = await future
+        except asyncio.TimeoutError:
+            # as_completed surfaces the outer budget timeout via the next
+            # awaitable, not as an exception on the for-loop itself. Bail out
+            # so the agent loop can start even if some servers are still stuck.
+            budget_exhausted = True
+            break
+        except asyncio.CancelledError:
+            continue
+        except Exception as exc:
+            # connect_single_server swallows its own exceptions, so this
+            # branch is mostly defensive.
+            logger.error("MCP connection task crashed: {}", exc)
+            continue
+        if result is not None and result[1] is not None:
             server_stacks[result[0]] = result[1]
+
+    if budget_exhausted:
+        elapsed = asyncio.get_event_loop().time() - start
+        still_pending = [tasks[t] for t in tasks if not t.done()]
+        logger.error(
+            "MCP connect budget of {}s exhausted after {:.1f}s; cancelling still-pending servers: {}",
+            outer_budget, elapsed, ", ".join(still_pending) or "(none)",
+        )
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        # Give cancelled tasks a brief window to unwind their exit stacks, but
+        # don't block the agent loop forever if the underlying transport
+        # refuses to honour cancellation.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks.keys(), return_exceptions=True),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Cancelled MCP connect tasks did not unwind within 5s; leaking them")
 
     return server_stacks
