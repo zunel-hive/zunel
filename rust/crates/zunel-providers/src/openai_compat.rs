@@ -2,14 +2,17 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::stream::BoxStream;
 use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
 use crate::base::{
-    ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, ToolSchema, Usage,
+    ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, StreamEvent, ToolSchema,
+    Usage,
 };
 use crate::error::{Error, Result};
+use crate::sse::SseBuffer;
 
 /// Provider hitting any OpenAI `chat.completions`-compatible endpoint.
 pub struct OpenAICompatProvider {
@@ -116,6 +119,16 @@ impl LLMProvider for OpenAICompatProvider {
         }
         unreachable!("loop always returns")
     }
+
+    fn generate_stream<'a>(
+        &'a self,
+        model: &'a str,
+        messages: &'a [ChatMessage],
+        _tools: &'a [ToolSchema],
+        settings: &'a GenerationSettings,
+    ) -> BoxStream<'a, Result<StreamEvent>> {
+        self.stream_impl(model, messages, settings)
+    }
 }
 
 fn parse_retry_after(headers: &header::HeaderMap) -> Option<Duration> {
@@ -124,6 +137,131 @@ fn parse_retry_after(headers: &header::HeaderMap) -> Option<Duration> {
         return Some(Duration::from_secs(seconds));
     }
     None
+}
+
+#[derive(Serialize)]
+struct StreamRequestBody<'a> {
+    model: &'a str,
+    messages: Vec<WireMessage<'a>>,
+    stream: bool,
+    stream_options: StreamOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+impl<'a> StreamRequestBody<'a> {
+    fn new(model: &'a str, messages: &'a [ChatMessage], settings: &GenerationSettings) -> Self {
+        let inner = RequestBody::new(model, messages, settings);
+        Self {
+            model: inner.model,
+            messages: inner.messages,
+            stream: true,
+            stream_options: StreamOptions { include_usage: true },
+            temperature: inner.temperature,
+            max_tokens: inner.max_tokens,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct StreamChunk {
+    #[serde(default)]
+    choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+#[derive(Deserialize)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: StreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct StreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+impl OpenAICompatProvider {
+    pub(crate) fn stream_impl<'a>(
+        &'a self,
+        model: &'a str,
+        messages: &'a [ChatMessage],
+        settings: &'a GenerationSettings,
+    ) -> BoxStream<'a, Result<StreamEvent>> {
+        let client = self.client.clone();
+        let url = format!("{}/chat/completions", self.api_base);
+        let body = StreamRequestBody::new(model, messages, settings);
+
+        Box::pin(async_stream::try_stream! {
+            let response = client.post(&url).json(&body).send().await?;
+            let status = response.status();
+            if !status.is_success() {
+                let text = response.text().await.unwrap_or_default();
+                Err(Error::ProviderReturned { status: status.as_u16(), body: text })?;
+                return;
+            }
+
+            let mut buffer = SseBuffer::new();
+            let mut accumulated = String::new();
+            let mut final_usage: Option<WireUsage> = None;
+            let mut stream = response.bytes_stream();
+
+            use futures::StreamExt;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(Error::Network)?;
+                let events = buffer.feed(&chunk);
+                for event in events {
+                    match event {
+                        None => {
+                            let response = LLMResponse {
+                                content: if accumulated.is_empty() {
+                                    None
+                                } else {
+                                    Some(accumulated.clone())
+                                },
+                                tool_calls: Vec::new(),
+                                usage: final_usage.take().unwrap_or_default().into(),
+                            };
+                            yield StreamEvent::Done(response);
+                            return;
+                        }
+                        Some(payload) => {
+                            let parsed: StreamChunk = serde_json::from_str(&payload)
+                                .map_err(|e| Error::Parse(format!("chunk decode: {e}")))?;
+                            for choice in &parsed.choices {
+                                if let Some(ref text) = choice.delta.content {
+                                    if !text.is_empty() {
+                                        accumulated.push_str(text);
+                                        yield StreamEvent::ContentDelta(text.clone());
+                                    }
+                                }
+                            }
+                            if let Some(u) = parsed.usage {
+                                final_usage = Some(u);
+                            }
+                        }
+                    }
+                }
+            }
+            let response = LLMResponse {
+                content: if accumulated.is_empty() { None } else { Some(accumulated) },
+                tool_calls: Vec::new(),
+                usage: final_usage.unwrap_or_default().into(),
+            };
+            yield StreamEvent::Done(response);
+        })
+    }
 }
 
 #[derive(Serialize)]
