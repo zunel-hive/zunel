@@ -11,6 +11,12 @@ pub enum Error {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    #[error("approval denied for tool {tool}")]
+    ApprovalDenied { tool: String },
+
+    #[error("approval timed out after {after_s}s for tool {tool}")]
+    ApprovalTimeout { tool: String, after_s: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
