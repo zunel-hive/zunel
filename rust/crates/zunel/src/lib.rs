@@ -13,9 +13,14 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
+
 pub use zunel_config::{Config, Error as ConfigError};
-pub use zunel_core::{AgentLoop, Error as CoreError, RunResult};
-pub use zunel_providers::{Error as ProviderError, LLMProvider};
+pub use zunel_core::{
+    AgentLoop, ChatRole, CommandContext, CommandOutcome, CommandRouter, Error as CoreError,
+    RunResult, Session, SessionManager,
+};
+pub use zunel_providers::{Error as ProviderError, LLMProvider, StreamEvent};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -30,7 +35,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub struct Zunel {
-    loop_inner: AgentLoop,
+    inner: AgentLoop,
 }
 
 impl Zunel {
@@ -38,13 +43,37 @@ impl Zunel {
     /// `<zunel_home>/config.json`.
     pub async fn from_config(path: Option<&Path>) -> Result<Self> {
         let cfg = zunel_config::load_config(path)?;
+        let workspace = zunel_config::workspace_path(&cfg.agents.defaults)?;
+        zunel_util::ensure_dir(&workspace).map_err(|source| CoreError::Session {
+            path: workspace.clone(),
+            source: Box::new(source),
+        })?;
         let provider: Arc<dyn LLMProvider> = zunel_providers::build_provider(&cfg)?;
-        let loop_inner = AgentLoop::new(provider, cfg.agents.defaults);
-        Ok(Self { loop_inner })
+        let sessions = SessionManager::new(&workspace);
+        let inner = AgentLoop::with_sessions(provider, cfg.agents.defaults, sessions);
+        Ok(Self { inner })
     }
 
-    /// Run a single prompt against the configured provider.
+    /// One-shot: run a single prompt with no session persistence.
+    /// Kept for slice-1 compatibility; prefer `run_streamed` for new code.
     pub async fn run(&self, message: &str) -> Result<RunResult> {
-        Ok(self.loop_inner.process_direct(message).await?)
+        Ok(self.inner.process_direct(message).await?)
+    }
+
+    /// Streaming turn with session persistence. Deltas arrive on `sink`;
+    /// the final `RunResult` returns when the turn ends. Drop or close
+    /// the receiver on `sink` to propagate-cancel the render consumer;
+    /// the provider stream always runs to completion so the session
+    /// file remains consistent.
+    pub async fn run_streamed(
+        &self,
+        session_key: &str,
+        message: &str,
+        sink: mpsc::Sender<StreamEvent>,
+    ) -> Result<RunResult> {
+        Ok(self
+            .inner
+            .process_streamed(session_key, message, sink)
+            .await?)
     }
 }

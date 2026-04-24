@@ -11,6 +11,7 @@ description = "Rust library facade for zunel."
 zunel-config.workspace = true
 zunel-core.workspace = true
 zunel-providers.workspace = true
+zunel-util.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 
@@ -20,3 +21,4 @@ wiremock = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+futures = { workspace = true }

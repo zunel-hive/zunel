@@ -29,9 +29,10 @@ async fn from_config_and_run() {
         format!(
             r#"{{
                 "providers": {{ "custom": {{ "apiKey": "sk", "apiBase": "{}" }} }},
-                "agents": {{ "defaults": {{ "provider": "custom", "model": "m" }} }}
+                "agents": {{ "defaults": {{ "provider": "custom", "model": "m", "workspace": "{}" }} }}
             }}"#,
-            server.uri()
+            server.uri(),
+            tmp.path().display()
         ),
     )
     .unwrap();
