@@ -18,6 +18,7 @@ fn config_with_custom() -> Config {
                 temperature: None,
                 max_tokens: None,
                 reasoning_effort: None,
+                workspace: None,
             },
         },
     }
