@@ -45,4 +45,9 @@ pub struct AgentDefaults {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub reasoning_effort: Option<String>,
+    /// Python compat: ``agents.defaults.workspace`` in config.json. Default
+    /// (``~/.zunel/workspace``) is applied at resolution time in
+    /// ``workspace_path``, not in this struct — keeping ``AgentDefaults``
+    /// round-trippable through serde without spurious values.
+    pub workspace: Option<String>,
 }
