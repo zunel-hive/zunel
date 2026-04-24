@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/zunel-config",
+    "crates/zunel-bus",
+    "crates/zunel-util",
+    "crates/zunel-providers",
+    "crates/zunel-core",
+    "crates/zunel-cli",
+    "crates/zunel",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+repository = "https://github.com/<org>/zunel"
+authors = ["zunel contributors"]
+
+[workspace.dependencies]
+# Async runtime + logging
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Errors
+thiserror = "1"
+anyhow = "1"
+
+# Paths / env
+dirs = "5"
+
+# Test deps
+wiremock = "0.6"
+insta = { version = "1", features = ["json"] }
+assert_cmd = "2"
+tempfile = "3"
+
+# Internal crate paths
+zunel-config = { path = "crates/zunel-config" }
+zunel-bus = { path = "crates/zunel-bus" }
+zunel-util = { path = "crates/zunel-util" }
+zunel-providers = { path = "crates/zunel-providers" }
+zunel-core = { path = "crates/zunel-core" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

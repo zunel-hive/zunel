@@ -1,0 +1,15 @@
+[package]
+name = "zunel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust library facade for zunel."
+
+[dependencies]
+zunel-config.workspace = true
+zunel-core.workspace = true
+zunel-providers.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
