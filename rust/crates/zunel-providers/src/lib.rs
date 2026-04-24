@@ -2,6 +2,7 @@
 
 mod base;
 mod build;
+pub mod codex;
 pub mod error;
 mod openai_compat;
 pub mod sse;
