@@ -138,6 +138,48 @@ fn parses_text_and_tool_call_responses_events_to_stream_events() {
 }
 
 #[test]
+fn emits_arguments_delta_when_arguments_only_arrive_on_output_item_done() {
+    let mut parser = ResponsesStreamParser::new();
+
+    let added = parser
+        .accept(&json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "write_file",
+                "arguments": ""
+            }
+        }))
+        .unwrap();
+    assert_eq!(added.len(), 1);
+
+    let done = parser
+        .accept(&json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "write_file",
+                "arguments": "{\"path\":\"late.txt\"}"
+            }
+        }))
+        .unwrap();
+
+    assert!(matches!(
+        &done[0],
+        StreamEvent::ToolCallDelta {
+            index: 0,
+            id: None,
+            name: None,
+            arguments_fragment: Some(fragment),
+        } if fragment == "{\"path\":\"late.txt\"}"
+    ));
+}
+
+#[test]
 fn maps_responses_status_to_chat_finish_reason() {
     assert_eq!(map_finish_reason(Some("completed")), "stop");
     assert_eq!(map_finish_reason(Some("incomplete")), "length");

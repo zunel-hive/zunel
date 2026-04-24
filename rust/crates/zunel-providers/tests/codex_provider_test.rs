@@ -52,7 +52,7 @@ async fn codex_provider_sends_expected_headers_and_body() {
             ],
             "text": {"verbosity": "medium"},
             "include": ["reasoning.encrypted_content"],
-            "prompt_cache_key": "c4f120b6edad0174f2748faaa7bfafb3aa06fd4583b3ae6d9e11530a298f26a1",
+            "prompt_cache_key": "668882938bb8d99444beb34358c312203574d3a25fa592de3c96d6e3e474c7ac",
             "tool_choice": "auto",
             "parallel_tool_calls": true,
             "reasoning": {"effort": "medium"},
@@ -105,6 +105,54 @@ async fn codex_provider_sends_expected_headers_and_body() {
                 reasoning_effort: Some("medium".into()),
                 ..Default::default()
             },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.finish_reason.as_deref(), Some("stop"));
+}
+
+#[tokio::test]
+async fn codex_provider_uses_default_model_when_requested_model_is_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/backend-api/codex/responses"))
+        .and(body_json(json!({
+            "model": "gpt-5.4",
+            "store": false,
+            "stream": true,
+            "instructions": "",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "hello"}]}
+            ],
+            "text": {"verbosity": "medium"},
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "d98167dd28f22e330824942ba4d4ce217c2411a0d1141d60b40fe4cb8dc0d232",
+            "tool_choice": "auto",
+            "parallel_tool_calls": true
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[json!({
+                    "type": "response.completed",
+                    "response": {"status": "completed"}
+                })])),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = CodexProvider::with_auth(
+        format!("{}/backend-api/codex/responses", server.uri()),
+        Arc::new(FixedAuth),
+    )
+    .unwrap();
+    let response = provider
+        .generate(
+            "",
+            &[ChatMessage::user("hello")],
+            &[],
+            &GenerationSettings::default(),
         )
         .await
         .unwrap();

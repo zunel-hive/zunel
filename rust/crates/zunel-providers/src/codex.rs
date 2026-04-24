@@ -21,10 +21,19 @@ const CODEX_USER_AGENT: &str = "zunel (rust)";
 const CODEX_LOGIN_HINT: &str =
     "Sign in with `codex login` using file-backed credentials, then retry.";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CodexAuth {
     pub access_token: String,
     pub account_id: String,
+}
+
+impl std::fmt::Debug for CodexAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexAuth")
+            .field("access_token", &"<redacted>")
+            .field("account_id", &self.account_id)
+            .finish()
+    }
 }
 
 #[async_trait]
@@ -97,8 +106,13 @@ impl CodexProvider {
         settings: &GenerationSettings,
     ) -> Result<Value> {
         let converted = convert_messages(messages)?;
+        let effective_model = if model.trim().is_empty() {
+            DEFAULT_CODEX_MODEL
+        } else {
+            model
+        };
         let mut body = json!({
-            "model": model,
+            "model": effective_model,
             "store": false,
             "stream": true,
             "instructions": converted.instructions,
@@ -149,10 +163,15 @@ impl LLMProvider for CodexProvider {
         Box::pin(async_stream::try_stream! {
             let token = self.auth.load().await?;
             let body = Self::request_body(model, messages, tools, settings)?;
+            let mut auth_header = reqwest::header::HeaderValue::from_str(
+                &format!("Bearer {}", token.access_token),
+            )
+            .map_err(|e| Error::Auth(format!("invalid Codex access token header: {e}")))?;
+            auth_header.set_sensitive(true);
             let response = self
                 .client
                 .post(&self.api_base)
-                .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", token.access_token))
+                .header(reqwest::header::AUTHORIZATION, auth_header)
                 .header("chatgpt-account-id", token.account_id)
                 .header("OpenAI-Beta", "responses=experimental")
                 .header("originator", CODEX_ORIGINATOR)
@@ -264,11 +283,28 @@ fn find_account_id(value: &Value) -> Option<String> {
 }
 
 fn prompt_cache_key(messages: &[ChatMessage]) -> Result<String> {
-    let raw = serde_json::to_string(messages)
+    let value = serde_json::to_value(messages)
+        .map_err(|e| Error::Parse(format!("prompt cache key encode: {e}")))?;
+    let raw = serde_json::to_string(&canonicalize_json(value))
         .map_err(|e| Error::Parse(format!("prompt cache key encode: {e}")))?;
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(canonicalize_json).collect()),
+        Value::Object(obj) => {
+            let mut sorted = serde_json::Map::new();
+            let ordered: std::collections::BTreeMap<_, _> = obj.into_iter().collect();
+            for (key, value) in ordered {
+                sorted.insert(key, canonicalize_json(value));
+            }
+            Value::Object(sorted)
+        }
+        other => other,
+    }
 }
 
 fn friendly_error(status: u16, raw: &str) -> String {

@@ -246,11 +246,20 @@ impl ResponsesStreamParser {
             return Ok(Vec::new());
         };
         if call.arguments.is_empty() {
-            call.arguments = item
+            let arguments = item
                 .get("arguments")
                 .and_then(Value::as_str)
                 .unwrap_or("{}")
                 .to_string();
+            call.arguments = arguments.clone();
+            if !arguments.is_empty() {
+                return Ok(vec![StreamEvent::ToolCallDelta {
+                    index: call.index,
+                    id: None,
+                    name: None,
+                    arguments_fragment: Some(arguments),
+                }]);
+            }
         }
         Ok(Vec::new())
     }

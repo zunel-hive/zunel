@@ -24,6 +24,19 @@ async fn reads_file_backed_codex_auth_from_codex_home() {
 }
 
 #[tokio::test]
+async fn codex_auth_debug_redacts_access_token() {
+    let token = zunel_providers::codex::CodexAuth {
+        access_token: "secret-access-token".into(),
+        account_id: "acct_fixture".into(),
+    };
+
+    let rendered = format!("{token:?}");
+    assert!(!rendered.contains("secret-access-token"), "{rendered}");
+    assert!(rendered.contains("acct_fixture"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+}
+
+#[tokio::test]
 async fn accepts_nested_account_id_shapes_seen_in_codex_auth_files() {
     let cases = [
         (r#""chatgpt_account_id": "acct_top""#, "acct_top"),
