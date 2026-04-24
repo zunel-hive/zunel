@@ -98,6 +98,20 @@ impl Session {
         self.updated_at = naive_local_iso_now();
     }
 
+    /// Append a pre-built JSON message verbatim (apart from a
+    /// `timestamp` field that is filled in if missing). Used by the
+    /// runner for assistant tool-call messages (`content: null` +
+    /// `tool_calls`) and tool-result messages, which `add_message`
+    /// cannot express.
+    pub fn append_raw_message(&mut self, mut value: Value) {
+        if let Some(obj) = value.as_object_mut() {
+            obj.entry("timestamp".to_string())
+                .or_insert_with(|| Value::String(naive_local_iso_now()));
+        }
+        self.messages.push(value);
+        self.updated_at = naive_local_iso_now();
+    }
+
     /// Return up to ``max_messages`` of the most recent unconsolidated
     /// messages, stripped of the ``timestamp`` field (LLMs don't need it).
     pub fn get_history(&self, max_messages: usize) -> Vec<Value> {

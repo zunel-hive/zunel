@@ -9,6 +9,7 @@ use crate::approval::{AllowAllApprovalHandler, ApprovalHandler};
 use crate::error::Result;
 use crate::runner::{AgentRunSpec, AgentRunner};
 use crate::session::{ChatRole, Session, SessionManager};
+use crate::trim::chat_message_to_value;
 use zunel_tools::ToolRegistry;
 
 /// Maximum number of prior messages replayed to the provider per turn.
@@ -188,13 +189,21 @@ impl AgentLoop {
 }
 
 fn persist_runner_message(session: &mut Session, msg: &ChatMessage) {
-    let role = match msg.role {
-        Role::User => ChatRole::User,
-        Role::Assistant => ChatRole::Assistant,
-        Role::System => ChatRole::System,
-        Role::Tool => ChatRole::Tool,
-    };
-    session.add_message(role, &msg.content);
+    // Plain text turns serialize fine via add_message (it stamps a
+    // timestamp). Tool messages and assistant turns carrying tool
+    // calls need the wire-shaped JSON, which add_message can't
+    // express, so we go through append_raw_message.
+    if matches!(msg.role, Role::Tool) || !msg.tool_calls.is_empty() {
+        session.append_raw_message(chat_message_to_value(msg));
+    } else {
+        let role = match msg.role {
+            Role::User => ChatRole::User,
+            Role::Assistant => ChatRole::Assistant,
+            Role::System => ChatRole::System,
+            Role::Tool => ChatRole::Tool,
+        };
+        session.add_message(role, &msg.content);
+    }
 }
 
 /// Convert persisted `Value` messages (from Session::get_history) into

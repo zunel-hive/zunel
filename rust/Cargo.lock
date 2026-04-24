@@ -3392,6 +3392,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "async-trait",
  "clap",
  "crossterm",
  "futures",
@@ -3449,6 +3450,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -3457,6 +3459,8 @@ dependencies = [
  "zunel-bus",
  "zunel-config",
  "zunel-providers",
+ "zunel-tokens",
+ "zunel-tools",
  "zunel-util",
 ]
 
