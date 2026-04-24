@@ -6,6 +6,7 @@ members = [
     "crates/zunel-util",
     "crates/zunel-providers",
     "crates/zunel-tokens",
+    "crates/zunel-skills",
     "crates/zunel-core",
     "crates/zunel-cli",
     "crates/zunel",
@@ -66,10 +67,16 @@ zunel-bus = { path = "crates/zunel-bus", version = "=0.2.0" }
 zunel-util = { path = "crates/zunel-util", version = "=0.2.0" }
 zunel-providers = { path = "crates/zunel-providers", version = "=0.2.0" }
 zunel-tokens = { path = "crates/zunel-tokens", version = "=0.2.0" }
+zunel-skills = { path = "crates/zunel-skills", version = "=0.2.0" }
 zunel-core = { path = "crates/zunel-core", version = "=0.2.0" }
 
 # Token counting
 tiktoken-rs = "0.7"
+
+# Skills / context
+serde_yaml = "0.9"
+walkdir = "2"
+which = "6"
 
 [profile.release]
 lto = "thin"
