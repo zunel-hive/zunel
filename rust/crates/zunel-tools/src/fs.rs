@@ -69,6 +69,11 @@ impl Tool for ReadFileTool {
         if !out.ends_with('\n') && !body.is_empty() {
             out.push('\n');
         }
+        if let Ok(meta) = tokio::fs::metadata(&path).await {
+            if let Ok(mtime) = meta.modified() {
+                ctx.file_state.mark_read(path.clone(), mtime);
+            }
+        }
         ToolResult::ok(out)
     }
 }
@@ -118,13 +123,93 @@ impl Tool for WriteFileTool {
             }
         }
         match tokio::fs::write(&path, content).await {
-            Ok(()) => ToolResult::ok(format!(
-                "wrote {} bytes to {}",
-                content.len(),
-                path.display()
-            )),
+            Ok(()) => {
+                ctx.file_state.invalidate(&path);
+                ToolResult::ok(format!(
+                    "wrote {} bytes to {}",
+                    content.len(),
+                    path.display()
+                ))
+            }
             Err(e) => ToolResult::err(format!("write_file: {e}")),
         }
+    }
+}
+
+pub struct EditFileTool {
+    policy: PathPolicy,
+}
+
+impl EditFileTool {
+    pub fn new(policy: PathPolicy) -> Self {
+        Self { policy }
+    }
+}
+
+#[async_trait]
+impl Tool for EditFileTool {
+    fn name(&self) -> &'static str {
+        "edit_file"
+    }
+    fn description(&self) -> &'static str {
+        "Replace `old` with `new` in a previously-read workspace file. `old` must occur exactly once."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old": {"type": "string"},
+                "new": {"type": "string"},
+            },
+            "required": ["path", "old", "new"],
+        })
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> ToolResult {
+        let Some(raw) = args.get("path").and_then(Value::as_str) else {
+            return ToolResult::err("edit_file: missing path".to_string());
+        };
+        let Some(old) = args.get("old").and_then(Value::as_str) else {
+            return ToolResult::err("edit_file: missing old".to_string());
+        };
+        let Some(new) = args.get("new").and_then(Value::as_str) else {
+            return ToolResult::err("edit_file: missing new".to_string());
+        };
+        let path = match resolve_path(&self.policy, ctx, raw) {
+            Ok(p) => p,
+            Err(msg) => return ToolResult::err(format!("edit_file: {msg}")),
+        };
+        let prior = ctx.file_state.last_read(&path);
+        let meta = match tokio::fs::metadata(&path).await {
+            Ok(m) => m,
+            Err(e) => return ToolResult::err(format!("edit_file: {e}")),
+        };
+        let current_mtime = meta.modified().ok();
+        if prior.is_none() || prior != current_mtime {
+            return ToolResult::err(format!(
+                "edit_file: read_file {raw} first (stale or never-read state)"
+            ));
+        }
+        let body = match tokio::fs::read_to_string(&path).await {
+            Ok(b) => b,
+            Err(e) => return ToolResult::err(format!("edit_file: {e}")),
+        };
+        let matches = body.matches(old).count();
+        if matches == 0 {
+            return ToolResult::err(format!("edit_file: old string not found in {raw}"));
+        }
+        if matches > 1 {
+            return ToolResult::err(format!(
+                "edit_file: old string matched {matches} times (multiple) in {raw}; include more surrounding context"
+            ));
+        }
+        let replaced = body.replacen(old, new, 1);
+        if let Err(e) = tokio::fs::write(&path, &replaced).await {
+            return ToolResult::err(format!("edit_file: {e}"));
+        }
+        ctx.file_state.invalidate(&path);
+        ToolResult::ok(format!("edited {}", path.display()))
     }
 }
 

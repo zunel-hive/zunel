@@ -8,11 +8,7 @@ use zunel_tools::{
 };
 
 fn ctx(ws: &std::path::Path) -> ToolContext {
-    ToolContext {
-        workspace: ws.to_path_buf(),
-        session_key: "cli:direct".into(),
-        cancel: tokio_util::sync::CancellationToken::new(),
-    }
+    ToolContext::new_with_workspace(ws.to_path_buf(), "cli:direct".into())
 }
 
 #[tokio::test]

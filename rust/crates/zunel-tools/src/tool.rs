@@ -4,26 +4,35 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::file_state::FileStateTracker;
+
 /// Per-call context a tool can read.
 ///
-/// Slice 3 exposes the workspace, the session key, and a cancellation
+/// Slice 3 exposes the workspace, the session key, a cancellation
 /// token so long-running tools (`exec`, `web_fetch`) can be aborted
-/// when the parent agent loop is cancelled.
+/// when the parent agent loop is cancelled, and a `FileStateTracker`
+/// shared between read/write/edit tools.
 #[derive(Clone)]
 pub struct ToolContext {
     pub workspace: PathBuf,
     pub session_key: String,
     pub cancel: tokio_util::sync::CancellationToken,
+    pub file_state: FileStateTracker,
 }
 
 impl ToolContext {
+    pub fn new_with_workspace(workspace: PathBuf, session_key: String) -> Self {
+        Self {
+            workspace,
+            session_key,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            file_state: FileStateTracker::default(),
+        }
+    }
+
     /// Build a throw-away context for tests.
     pub fn for_test() -> Self {
-        Self {
-            workspace: std::env::temp_dir(),
-            session_key: "cli:direct".into(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-        }
+        Self::new_with_workspace(std::env::temp_dir(), "cli:direct".into())
     }
 }
 
