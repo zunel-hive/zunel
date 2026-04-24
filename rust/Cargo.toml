@@ -48,12 +48,13 @@ assert_cmd = "2"
 tempfile = "3"
 serial_test = "3"
 
-# Internal crate paths
-zunel-config = { path = "crates/zunel-config" }
-zunel-bus = { path = "crates/zunel-bus" }
-zunel-util = { path = "crates/zunel-util" }
-zunel-providers = { path = "crates/zunel-providers" }
-zunel-core = { path = "crates/zunel-core" }
+# Internal crate paths. Versions are pinned to the workspace version so
+# cargo-deny does not flag them as wildcard deps on publishable crates.
+zunel-config = { path = "crates/zunel-config", version = "=0.2.0" }
+zunel-bus = { path = "crates/zunel-bus", version = "=0.2.0" }
+zunel-util = { path = "crates/zunel-util", version = "=0.2.0" }
+zunel-providers = { path = "crates/zunel-providers", version = "=0.2.0" }
+zunel-core = { path = "crates/zunel-core", version = "=0.2.0" }
 
 [profile.release]
 lto = "thin"
