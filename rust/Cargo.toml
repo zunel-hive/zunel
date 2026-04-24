@@ -8,6 +8,7 @@ members = [
     "crates/zunel-tokens",
     "crates/zunel-skills",
     "crates/zunel-context",
+    "crates/zunel-tools",
     "crates/zunel-core",
     "crates/zunel-cli",
     "crates/zunel",
@@ -70,6 +71,7 @@ zunel-providers = { path = "crates/zunel-providers", version = "=0.2.0" }
 zunel-tokens = { path = "crates/zunel-tokens", version = "=0.2.0" }
 zunel-skills = { path = "crates/zunel-skills", version = "=0.2.0" }
 zunel-context = { path = "crates/zunel-context", version = "=0.2.0" }
+zunel-tools = { path = "crates/zunel-tools", version = "=0.2.0" }
 zunel-core = { path = "crates/zunel-core", version = "=0.2.0" }
 
 # Token counting
@@ -80,6 +82,16 @@ serde_yaml = "0.9"
 walkdir = "2"
 which = "6"
 minijinja = "2"
+
+# Tools
+async-trait = "0.1"
+globset = "0.4"
+html2md = "0.2"
+ignore = "0.4"
+regex = "1"
+sha2 = "0.10"
+tokio-util = { version = "0.7", features = ["rt"] }
+url = "2"
 
 [profile.release]
 lto = "thin"

@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 async-stream.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true
