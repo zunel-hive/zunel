@@ -11,11 +11,14 @@ description = "Rust library facade for zunel."
 zunel-config.workspace = true
 zunel-core.workspace = true
 zunel-providers.workspace = true
+zunel-skills.workspace = true
+zunel-tools.workspace = true
 zunel-util.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock = { workspace = true }
 tempfile = { workspace = true }

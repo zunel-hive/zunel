@@ -17,10 +17,13 @@ use tokio::sync::mpsc;
 
 pub use zunel_config::{Config, Error as ConfigError};
 pub use zunel_core::{
-    AgentLoop, ChatRole, CommandContext, CommandOutcome, CommandRouter, Error as CoreError,
-    RunResult, Session, SessionManager,
+    AgentLoop, ApprovalDecision, ApprovalHandler, ApprovalRequest, ApprovalScope, ChatRole,
+    CommandContext, CommandOutcome, CommandRouter, Error as CoreError, RunResult, Session,
+    SessionManager,
 };
-pub use zunel_providers::{Error as ProviderError, LLMProvider, StreamEvent};
+pub use zunel_providers::{Error as ProviderError, LLMProvider, StreamEvent, ToolProgress};
+pub use zunel_skills::{Skill, SkillsLoader};
+pub use zunel_tools::{Tool, ToolContext, ToolRegistry, ToolResult};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -50,8 +53,24 @@ impl Zunel {
         })?;
         let provider: Arc<dyn LLMProvider> = zunel_providers::build_provider(&cfg)?;
         let sessions = SessionManager::new(&workspace);
-        let inner = AgentLoop::with_sessions(provider, cfg.agents.defaults, sessions);
+        let registry = zunel_core::build_default_registry(&cfg, &workspace);
+        let inner = AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions)
+            .with_tools(registry)
+            .with_workspace(workspace);
         Ok(Self { inner })
+    }
+
+    /// Read-only access to the registered tool set. Includes both the
+    /// defaults seeded by `from_config` and anything later registered
+    /// via [`Self::register_tool`].
+    pub fn tools(&self) -> &ToolRegistry {
+        self.inner.tools()
+    }
+
+    /// Add a custom tool to the registry. Subsequent turns will see
+    /// it in the function-call schema sent to the provider.
+    pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
+        self.inner.register_tool(tool);
     }
 
     /// One-shot: run a single prompt with no session persistence.

@@ -3,6 +3,7 @@
 mod agent_loop;
 pub mod approval;
 pub mod command;
+pub mod default_tools;
 mod error;
 pub mod runner;
 mod session;
@@ -14,6 +15,7 @@ pub use approval::{
     ApprovalHandler, ApprovalRequest, ApprovalScope, CachedApprovalHandler,
 };
 pub use command::{CommandContext, CommandOutcome, CommandRouter};
+pub use default_tools::build_default_registry;
 pub use error::{Error, Result};
 pub use runner::{AgentRunResult, AgentRunSpec, AgentRunner, StopReason};
 pub use session::{ChatRole, Session, SessionManager};
