@@ -11,6 +11,7 @@ pub mod search;
 pub mod shell;
 pub mod ssrf;
 mod tool;
+pub mod web;
 
 pub use error::{Error, Result};
 pub use registry::ToolRegistry;
