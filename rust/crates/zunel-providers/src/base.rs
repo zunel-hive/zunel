@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -85,10 +86,19 @@ pub struct ToolSchema {
     pub parameters: serde_json::Value,
 }
 
+/// A single frame of a streaming response.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// Incremental assistant text.
+    ContentDelta(String),
+    /// Terminal event carrying the complete response (content, tool calls,
+    /// usage). Producers must emit exactly one `Done` per stream.
+    Done(LLMResponse),
+}
+
 #[async_trait]
 pub trait LLMProvider: Send + Sync {
-    /// Generate a single completion. Slice 1 requires only this method;
-    /// streaming support lands in slice 2.
+    /// Generate a single non-streaming completion.
     async fn generate(
         &self,
         model: &str,
@@ -96,4 +106,101 @@ pub trait LLMProvider: Send + Sync {
         tools: &[ToolSchema],
         settings: &GenerationSettings,
     ) -> Result<LLMResponse>;
+
+    /// Generate a streaming completion. Default impl synthesizes a single
+    /// `ContentDelta` + `Done` from `generate()` — override for true
+    /// token-by-token streaming.
+    fn generate_stream<'a>(
+        &'a self,
+        model: &'a str,
+        messages: &'a [ChatMessage],
+        tools: &'a [ToolSchema],
+        settings: &'a GenerationSettings,
+    ) -> BoxStream<'a, Result<StreamEvent>> {
+        Box::pin(async_stream::try_stream! {
+            let response = self.generate(model, messages, tools, settings).await?;
+            if let Some(ref content) = response.content {
+                if !content.is_empty() {
+                    yield StreamEvent::ContentDelta(content.clone());
+                }
+            }
+            yield StreamEvent::Done(response);
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::StreamExt;
+
+    struct Constant(String);
+
+    #[async_trait]
+    impl LLMProvider for Constant {
+        async fn generate(
+            &self,
+            _model: &str,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSchema],
+            _settings: &GenerationSettings,
+        ) -> Result<LLMResponse> {
+            Ok(LLMResponse {
+                content: Some(self.0.clone()),
+                tool_calls: Vec::new(),
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn default_generate_stream_yields_delta_then_done() {
+        let provider = Constant("hello".into());
+        let messages = [ChatMessage::user("hi")];
+        let tools: [ToolSchema; 0] = [];
+        let settings = GenerationSettings::default();
+        let stream = provider.generate_stream("m", &messages, &tools, &settings);
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            Ok(StreamEvent::ContentDelta(s)) => assert_eq!(s, "hello"),
+            other => panic!("expected ContentDelta, got {other:?}"),
+        }
+        match &events[1] {
+            Ok(StreamEvent::Done(resp)) => {
+                assert_eq!(resp.content.as_deref(), Some("hello"));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_content_skips_delta_but_emits_done() {
+        struct Empty;
+        #[async_trait]
+        impl LLMProvider for Empty {
+            async fn generate(
+                &self,
+                _model: &str,
+                _messages: &[ChatMessage],
+                _tools: &[ToolSchema],
+                _settings: &GenerationSettings,
+            ) -> Result<LLMResponse> {
+                Ok(LLMResponse {
+                    content: None,
+                    tool_calls: Vec::new(),
+                    usage: Usage::default(),
+                })
+            }
+        }
+        let provider = Empty;
+        let messages = [ChatMessage::user("hi")];
+        let tools: [ToolSchema; 0] = [];
+        let settings = GenerationSettings::default();
+        let stream = provider.generate_stream("m", &messages, &tools, &settings);
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], Ok(StreamEvent::Done(_))));
+    }
 }

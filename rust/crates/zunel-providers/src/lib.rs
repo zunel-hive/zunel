@@ -6,8 +6,8 @@ mod error;
 mod openai_compat;
 
 pub use base::{
-    ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, ToolCallRequest, ToolSchema,
-    Usage,
+    ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, StreamEvent,
+    ToolCallRequest, ToolSchema, Usage,
 };
 pub use build::build_provider;
 pub use error::{Error, Result};
