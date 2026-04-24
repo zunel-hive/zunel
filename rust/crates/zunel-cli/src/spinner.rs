@@ -1,8 +1,3 @@
-// `#[allow(dead_code)]` is lifted in Task 10 when `StreamingRenderer`
-// calls `ThinkingSpinner::start()`/`stop()`. Kept here so this commit
-// stays clippy-clean in isolation.
-#![allow(dead_code)]
-
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
