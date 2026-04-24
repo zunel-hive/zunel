@@ -8,6 +8,10 @@
 /// - `None` is the `[DONE]` sentinel indicating end-of-stream.
 #[derive(Debug, Default)]
 pub struct SseBuffer {
+    /// Raw bytes pending UTF-8 decoding. When `reqwest::bytes_stream()`
+    /// splits a multi-byte codepoint across chunks, the tail bytes live
+    /// here until the continuation arrives.
+    pending: Vec<u8>,
     line_buf: String,
     event_data: Vec<String>,
 }
@@ -22,18 +26,17 @@ impl SseBuffer {
     /// stay buffered until the next call.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Option<String>> {
         let mut events = Vec::new();
-        // Text-append strategy: we assume UTF-8 (OpenAI always sends it)
-        // and tolerate partial code points by deferring unknown bytes.
-        let s = match std::str::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(e) => {
-                // Push valid prefix; drop the invalid tail. Real providers
-                // don't emit invalid UTF-8 in practice.
-                let valid = &bytes[..e.valid_up_to()];
-                std::str::from_utf8(valid).unwrap_or("")
-            }
+        self.pending.extend_from_slice(bytes);
+        let valid_up_to = match std::str::from_utf8(&self.pending) {
+            Ok(_) => self.pending.len(),
+            Err(e) => e.valid_up_to(),
         };
-        self.line_buf.push_str(s);
+        if valid_up_to > 0 {
+            let decoded = std::str::from_utf8(&self.pending[..valid_up_to])
+                .expect("valid_up_to bytes are by definition valid UTF-8");
+            self.line_buf.push_str(decoded);
+            self.pending.drain(..valid_up_to);
+        }
 
         // Process all complete lines in the buffer.
         while let Some(idx) = self.line_buf.find('\n') {

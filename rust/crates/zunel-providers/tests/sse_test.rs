@@ -53,3 +53,19 @@ fn handles_crlf_line_endings() {
     let events = buf.feed(b"data: hi\r\n\r\n");
     assert_eq!(events, vec![Some("hi".to_string())]);
 }
+
+#[test]
+fn buffers_partial_utf8_across_chunks() {
+    // `€` = 0xE2 0x82 0xAC; `🌍` = 0xF0 0x9F 0x8C 0x8D.
+    // When a TCP boundary splits a multi-byte codepoint we must not
+    // drop the prefix — the full glyph should round-trip once the
+    // continuation bytes arrive.
+    let mut buf = SseBuffer::new();
+    assert!(buf.feed(b"data: price ").is_empty());
+    assert!(buf.feed(&[0xE2, 0x82]).is_empty());
+    assert!(buf.feed(&[0xAC]).is_empty());
+    assert!(buf.feed(b" ").is_empty());
+    assert!(buf.feed(&[0xF0, 0x9F, 0x8C, 0x8D]).is_empty());
+    let events = buf.feed(b"\n\n");
+    assert_eq!(events, vec![Some("price \u{20ac} \u{1f30d}".to_string())]);
+}
