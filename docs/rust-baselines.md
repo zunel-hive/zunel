@@ -142,3 +142,130 @@ magnitude below Python.
 - Local tag: `rust-slice-2` (not pushed; local-only until user authorizes)
 - Next: slice 3 spec (local tools + skills + context builder).
 
+## Slice 3
+
+Measurements after slice 3 (local tools + skills + context builder).
+Same methodology as slice 2.
+
+### Startup
+
+| Implementation       | Mean    | Min    | Max    |
+| -------------------- | ------- | ------ | ------ |
+| Python zunel         | 348.7   | 339.4  | 371.6  |
+| Rust zunel (slice 2) |  51.9   |  46.7  |  55.9  |
+| Rust zunel (slice 3) |  55.6   |  50.2  |  61.8  |
+
+All values in milliseconds. Slice 3 startup is +3.7 ms (+7.1%) vs slice 2,
+inside the ≤10% per-slice budget. The slowdown comes from the new
+crates pulled into the binary (tools, skills, context, tokens) faulting
+in their text pages during clap's argument pass.
+
+### Memory (peak RSS)
+
+| Implementation       | Peak RSS  |
+| -------------------- | --------- |
+| Python zunel         |  56.4 MiB |
+| Rust zunel (slice 2) |   6.84 MiB |
+| Rust zunel (slice 3) |   7.33 MiB |
+
+Slice 3 RSS grows by ~0.49 MiB over slice 2; still 7.7× less than
+Python. Comfortably under the ≤12 MiB cap.
+
+### Binary size
+
+- Rust release stripped: **7.50 MiB** (`ls -l target/release/zunel`,
+  arm64 macOS)
+- Delta vs slice 2: **+3.80 MiB** (+103%)
+- This **overshoots the aspirational ≤ 7 MiB target by 0.50 MiB**.
+  Top contributors (`cargo bloat --crates`):
+  - `std` 1.0 MiB
+  - `regex_automata` 371 KiB
+  - `rustls` 287 KiB
+  - `clap_builder` 166 KiB
+  - `regex_syntax` 151 KiB
+  - `tokio` 145 KiB
+  - `ring` 142 KiB
+  - `html5ever` 125 KiB (via `htmd` HTML→Markdown)
+  - `htmd` 95 KiB
+  - The remaining ~3.5 MiB is data (tiktoken-rs BPE tables, embedded
+    templates, BPE files, etc.).
+- We swapped `html2md` (GPL-3.0) for `htmd` (Apache-2.0) during the
+  exit gate so `cargo deny check licenses` passes; doing so also let
+  us re-enable `panic = "abort"` in the release profile, recovering
+  ~1.1 MiB compared to the first slice-3 build.
+- The final 0.5 MiB overrun is tracked as deferred polish item #6
+  below; trimming will likely require either pruning `tiktoken-rs`'s
+  BPE table embedding or replacing `rustls` with `native-tls`.
+
+### Notes
+
+- New deps this slice: `tiktoken-rs`, `minijinja`, `serde_yaml`,
+  `walkdir`, `ignore`, `globset`, `regex`, `htmd`, `sha2`, `url`,
+  `which`, `chrono` (already added in slice 2 transitively).
+- Nine local tools registered by default in `zunel-core::default_tools`:
+  `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`,
+  `exec`, `web_fetch`, `web_search`.
+- Five-stage trim pipeline (orphan / backfill / microcompact /
+  budget / snip) applied before every provider call.
+- System prompt is byte-compatible with the Python `ContextBuilder`
+  (verified by `prompt_snapshot_test`).
+
+### Deferred polish (not blockers for exit gate)
+
+These are items the spec calls out for Python parity that we chose to
+land after slice 3's exit tag, to keep the core loop reviewable. Each
+is a ≤ 1-day task, tracked as individual commits on `rust-slice-3`
+rather than a new slice:
+
+1. `finish_reason == "length"` retry: currently `AgentRunner` just
+   breaks with `StopReason::Completed`. Add a single retry that doubles
+   `GenerationSettings::max_tokens` and re-streams the same turn
+   (Python `runner.py`: `_handle_length_finish`).
+2. Concurrent-safe tool batching: `AgentRunner` currently dispatches
+   tool calls sequentially. Add a `futures::future::join_all` fast
+   path for calls where every tool returns `concurrency_safe == true`.
+3. Tool-result sidecar persistence: `apply_tool_result_budget`
+   truncates but does not persist the full content. Add
+   `maybe_persist_tool_result` that writes
+   `<workspace>/tool-results/<sha256>.txt` and embeds the path +
+   truncation marker in the truncated message (Python
+   `runner.py::maybe_persist_tool_result`).
+4. Python-parity `name` field on `role: "tool"` JSONL rows: session
+   writer adds it back during serialization; plumb through
+   `ChatMessage` so it survives round-trip instead.
+5. DuckDuckGo HTML scraper hardening: DDG changes markup often.
+   Current Task 11 parser is a minimum viable port — add a
+   retry-with-lite-endpoint fallback.
+6. Binary size trim back below 7 MiB. Likely targets:
+   - Audit `tiktoken-rs` features (drop unused encodings; the BPE
+     tables are the largest data contributor).
+   - Audit whether `rustls` can be replaced with `native-tls` on
+     macOS to drop the embedded crypto stack.
+   - Move `serde_yaml` (deprecated, ~250 KiB) to a leaner YAML
+     reader for skill frontmatter.
+
+## Slice 3 Exit
+
+- Commit range: `e65c1b8..<tip>` (slice-2 tip → slice-3 tip)
+- Test count: 145 tests (slice 2's 63 + slice 3 additions: tokens,
+  skills, context + snapshot, tools registry, FS / search / shell /
+  web / web-search tools, SSRF, ApprovalHandler, AgentRunner, trim
+  pipeline, session tool messages, REPL+approval wiring, facade
+  tools, E2E CLI tool-call roundtrip, Python prompt snapshot)
+- Release build: clean on `cargo build --release --workspace`
+- Clippy: clean with `-D warnings` on `--all-targets`
+- Rustfmt: clean on `cargo fmt --check`
+- cargo-deny: advisories + bans + licenses + sources all ok
+  (after swapping `html2md` for `htmd` to drop GPL-3.0 from the
+  dependency graph)
+- Static binary: **7.50 MiB** (macOS arm64, stripped; +3.80 MiB vs
+  slice 2; 0.50 MiB over the aspirational ≤ 7 MiB target — see
+  deferred polish item #6)
+- Startup delta vs slice 2: **+7.1%** (55.6 ms vs 51.9 ms), inside
+  the ≤10% per-slice budget.
+- Peak RSS delta vs slice 2: **+0.49 MiB** (7.33 MiB vs 6.84 MiB);
+  still 7.7× less than Python (56.4 MiB).
+- Local tag: `rust-slice-3` (not pushed; local-only until user
+  authorizes)
+- Next: slice 4 spec (Codex provider + MCP client + remaining tools).
+

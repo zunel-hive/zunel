@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 async-trait.workspace = true
 globset.workspace = true
-html2md.workspace = true
+htmd.workspace = true
 ignore.workspace = true
 regex.workspace = true
 reqwest.workspace = true

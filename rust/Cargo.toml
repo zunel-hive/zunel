@@ -86,7 +86,7 @@ minijinja = "2"
 # Tools
 async-trait = "0.1"
 globset = "0.4"
-html2md = "0.2"
+htmd = "0.5"
 ignore = "0.4"
 regex = "1"
 sha2 = "0.10"
@@ -97,11 +97,7 @@ url = "2"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-# panic = "abort" disabled while we depend on html2md, whose [lib]
-# declares dylib/staticlib crate types that can only be built under
-# panic = unwind. Re-enable once zunel-tools::web swaps to a crate
-# without this restriction or once we vendor a minimal converter.
-panic = "unwind"
+panic = "abort"
 
 # The profile that 'dist' will build with
 [profile.dist]

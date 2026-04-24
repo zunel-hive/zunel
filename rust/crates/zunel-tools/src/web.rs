@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use html2md::parse_html;
 use serde_json::{json, Value};
 
 use crate::ssrf::validate_url_target;
@@ -88,7 +87,10 @@ impl Tool for WebFetchTool {
             Err(e) => return ToolResult::err(format!("web_fetch: body read failed: {e}")),
         };
         if ctype.starts_with("text/html") || body.trim_start().starts_with("<!") {
-            let md = parse_html(&body);
+            // htmd is a turndown-style HTML→Markdown converter (Apache-2.0).
+            // If conversion fails for some pathological markup, fall back
+            // to the raw body so the agent still gets *something* useful.
+            let md = htmd::convert(&body).unwrap_or_else(|_| body.clone());
             ToolResult::ok(md)
         } else {
             ToolResult::ok(body)
