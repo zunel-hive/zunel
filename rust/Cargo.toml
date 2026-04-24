@@ -37,6 +37,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+reedline = "0.37"
 
 # Errors
 thiserror = "1"
