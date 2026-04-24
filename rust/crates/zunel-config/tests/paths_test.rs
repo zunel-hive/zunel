@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
+use serial_test::serial;
+
 #[test]
+#[serial(zunel_home_env)]
 fn zunel_home_respects_env_override() {
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("ZUNEL_HOME", tmp.path());
@@ -9,6 +12,7 @@ fn zunel_home_respects_env_override() {
 }
 
 #[test]
+#[serial(zunel_home_env)]
 fn config_path_defaults_to_config_json_inside_home() {
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("ZUNEL_HOME", tmp.path());

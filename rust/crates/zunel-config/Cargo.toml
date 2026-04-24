@@ -16,3 +16,4 @@ dirs.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 insta.workspace = true
+serial_test.workspace = true

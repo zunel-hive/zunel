@@ -1,5 +1,7 @@
 use std::fs;
 
+use serial_test::serial;
+
 #[test]
 fn load_from_explicit_path() {
     let tmp = tempfile::tempdir().unwrap();
@@ -19,6 +21,7 @@ fn load_from_explicit_path() {
 }
 
 #[test]
+#[serial(zunel_home_env)]
 fn load_from_default_path_via_zunel_home() {
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("ZUNEL_HOME", tmp.path());
