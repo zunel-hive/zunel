@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 async-trait = "0.1"
 chrono.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -21,6 +22,7 @@ zunel-util.workspace = true
 
 [dev-dependencies]
 async-trait = "0.1"
-wiremock = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
-tempfile = { workspace = true }
+async-stream.workspace = true
+wiremock.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }

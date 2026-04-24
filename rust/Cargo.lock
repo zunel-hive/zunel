@@ -2652,8 +2652,10 @@ dependencies = [
 name = "zunel-core"
 version = "0.2.0"
 dependencies = [
+ "async-stream",
  "async-trait",
  "chrono",
+ "futures",
  "serde",
  "serde_json",
  "tempfile",
