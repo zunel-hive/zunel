@@ -18,4 +18,6 @@ zunel-config.workspace = true
 zunel-providers.workspace = true
 
 [dev-dependencies]
-wiremock.workspace = true
+async-trait = "0.1"
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
