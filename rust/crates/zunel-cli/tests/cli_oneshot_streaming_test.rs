@@ -67,7 +67,10 @@ async fn one_shot_streams_content_to_stdout() {
 
     // Session should now be persisted at <workspace>/sessions/cli_direct.jsonl
     let session_file = tmp.path().join("sessions/cli_direct.jsonl");
-    assert!(session_file.exists(), "session file missing at {session_file:?}");
+    assert!(
+        session_file.exists(),
+        "session file missing at {session_file:?}"
+    );
     let body = fs::read_to_string(&session_file).unwrap();
     assert!(body.contains("\"content\": \"hi\""));
     assert!(body.contains("\"content\": \"streaming ok\""));

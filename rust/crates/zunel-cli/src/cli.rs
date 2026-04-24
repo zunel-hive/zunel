@@ -25,7 +25,11 @@ pub enum Command {
 
 #[derive(Debug, Parser)]
 pub struct AgentArgs {
-    /// One-shot message to send.
+    /// One-shot message to send. Without this, drops into an interactive REPL.
     #[arg(short = 'm', long = "message")]
-    pub message: String,
+    pub message: Option<String>,
+
+    /// Session ID (channel:chat_id). Defaults to `cli:direct`.
+    #[arg(short = 's', long = "session", default_value = "cli:direct")]
+    pub session: String,
 }

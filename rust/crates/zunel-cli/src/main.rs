@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod renderer;
+mod repl;
 mod spinner;
 
 use anyhow::Result;

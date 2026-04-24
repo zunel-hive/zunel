@@ -63,3 +63,9 @@ fn expand_tilde(raw: &str) -> PathBuf {
 pub fn sessions_dir(workspace: &std::path::Path) -> PathBuf {
     workspace.join("sessions")
 }
+
+/// Persistent REPL history file: `<zunel_home>/cli_history.txt`.
+/// Matches Python's `get_cli_history_path`.
+pub fn cli_history_path() -> Result<PathBuf> {
+    Ok(zunel_home()?.join("cli_history.txt"))
+}
