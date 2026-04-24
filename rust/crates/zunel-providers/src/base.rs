@@ -22,6 +22,10 @@ pub struct ChatMessage {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Populated on `role == "assistant"` turns that emit tool calls.
+    /// Empty for text-only turns and for tool / user / system roles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallRequest>,
 }
 
 impl ChatMessage {
@@ -30,6 +34,7 @@ impl ChatMessage {
             role: Role::User,
             content: content.into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }
     }
     pub fn system(content: impl Into<String>) -> Self {
@@ -37,6 +42,7 @@ impl ChatMessage {
             role: Role::System,
             content: content.into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -44,17 +50,61 @@ impl ChatMessage {
             role: Role::Assistant,
             content: content.into(),
             tool_call_id: None,
+            tool_calls: Vec::new(),
+        }
+    }
+    /// Assistant message carrying tool calls. Content may be empty; the
+    /// wire serializer emits `content: null` when `tool_calls` is
+    /// non-empty to match Python zunel's JSONL.
+    pub fn assistant_with_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCallRequest>,
+    ) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls,
+        }
+    }
+    /// Tool-result message correlating with an earlier assistant tool call.
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_call_id: Some(tool_call_id.into()),
+            tool_calls: Vec::new(),
         }
     }
 }
 
-/// A tool-call the provider wants the agent to execute. Defined here for
-/// forward compat with slice 3; slice 1 never populates it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// OpenAI-style tool call, reassembled from SSE deltas or emitted
+/// whole by non-streaming responses. The `arguments` value is the
+/// *parsed* JSON object (Python zunel stores a JSON string; Rust
+/// keeps it as `serde_json::Value` so callers don't re-parse).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallRequest {
+    /// Provider-supplied opaque ID, e.g. `"call_abc"`.
     pub id: String,
+    /// Tool name, e.g. `"read_file"`. Matches `function.name`.
     pub name: String,
+    /// Parsed `function.arguments`. Always an object at dispatch time.
     pub arguments: serde_json::Value,
+    /// Assistant-message index. Providers may emit multiple tool
+    /// calls within a single response; `index` preserves their order.
+    #[serde(default)]
+    pub index: u32,
+}
+
+/// One chunk of a streamed tool call. Multiple `ToolCallDelta` events
+/// with the same `index` combine into a single `ToolCallRequest` once
+/// `ToolCallAccumulator::finalize` runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallDelta {
+    pub index: u32,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub arguments_fragment: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -69,6 +119,11 @@ pub struct LLMResponse {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCallRequest>,
     pub usage: Usage,
+    /// Terminal-stream / response `finish_reason`: "stop", "length",
+    /// "tool_calls", "content_filter", or `None` when the provider
+    /// omitted it. Slice 3's agent runner reads this to decide whether
+    /// to continue the tool loop or retry with a larger token cap.
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -91,8 +146,20 @@ pub struct ToolSchema {
 pub enum StreamEvent {
     /// Incremental assistant text.
     ContentDelta(String),
+    /// Partial tool call fragment. Consumers must pass these through
+    /// `ToolCallAccumulator` to materialize executable
+    /// `ToolCallRequest`s — a single logical call is often split
+    /// across many deltas (typically id+name in the first, JSON
+    /// arguments streamed across the rest).
+    ToolCallDelta {
+        index: u32,
+        id: Option<String>,
+        name: Option<String>,
+        arguments_fragment: Option<String>,
+    },
     /// Terminal event carrying the complete response (content, tool calls,
-    /// usage). Producers must emit exactly one `Done` per stream.
+    /// usage, finish_reason). Producers must emit exactly one `Done`
+    /// per stream.
     Done(LLMResponse),
 }
 
@@ -150,6 +217,7 @@ mod tests {
                 content: Some(self.0.clone()),
                 tool_calls: Vec::new(),
                 usage: Usage::default(),
+                finish_reason: None,
             })
         }
     }
@@ -191,6 +259,7 @@ mod tests {
                     content: None,
                     tool_calls: Vec::new(),
                     usage: Usage::default(),
+                    finish_reason: None,
                 })
             }
         }

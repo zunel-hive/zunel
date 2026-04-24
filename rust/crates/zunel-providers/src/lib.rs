@@ -5,11 +5,13 @@ mod build;
 mod error;
 mod openai_compat;
 pub mod sse;
+mod tool_call_accumulator;
 
 pub use base::{
-    ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, StreamEvent, ToolCallRequest,
-    ToolSchema, Usage,
+    ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, StreamEvent, ToolCallDelta,
+    ToolCallRequest, ToolSchema, Usage,
 };
 pub use build::build_provider;
 pub use error::{Error, Result};
 pub use openai_compat::OpenAICompatProvider;
+pub use tool_call_accumulator::{ToolCallAccumulator, ToolCallAssemblyError};

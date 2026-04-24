@@ -142,6 +142,10 @@ impl AgentLoop {
                     final_content =
                         Some(resp.content.clone().unwrap_or_else(|| accumulated.clone()));
                 }
+                // Slice 2's inline runner does not dispatch tool calls;
+                // AgentRunner (Task 13) owns that logic. We still forward
+                // deltas to the sink so the REPL can render progress.
+                StreamEvent::ToolCallDelta { .. } => {}
             }
             // Best-effort: if the sink is dropped, keep consuming the
             // provider stream so the underlying transport (HTTP today,
@@ -182,6 +186,7 @@ fn history_to_chat_messages(history: &[Value]) -> Vec<ChatMessage> {
                 role: role_enum,
                 content: content.to_string(),
                 tool_call_id: None,
+                tool_calls: Vec::new(),
             })
         })
         .collect()

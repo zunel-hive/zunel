@@ -48,6 +48,10 @@ impl StreamingRenderer {
                         writeln!(stdout)?;
                     }
                 }
+                // Tool-call progress rendering lands in Task 16.
+                // Slice 2's renderer deliberately drops deltas so
+                // existing fixtures stay green.
+                StreamEvent::ToolCallDelta { .. } => {}
             }
         }
 

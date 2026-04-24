@@ -22,3 +22,4 @@ zunel-config.workspace = true
 wiremock = { workspace = true }
 insta = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
+proptest = { workspace = true }

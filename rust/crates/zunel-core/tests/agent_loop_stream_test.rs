@@ -49,6 +49,7 @@ impl LLMProvider for StreamingFake {
                 content: Some(full),
                 tool_calls: Vec::new(),
                 usage: Usage { prompt_tokens: 2, completion_tokens: 3, cached_tokens: 0 },
+                finish_reason: None,
             }));
         })
     }

@@ -28,6 +28,7 @@ impl LLMProvider for FakeProvider {
                 completion_tokens: 1,
                 cached_tokens: 0,
             },
+            finish_reason: None,
         })
     }
 }
@@ -67,6 +68,7 @@ async fn empty_provider_content_becomes_empty_string() {
                 content: None,
                 tool_calls: Vec::new(),
                 usage: Usage::default(),
+                finish_reason: None,
             })
         }
     }

@@ -38,6 +38,7 @@ async fn generates_simple_completion() {
                 role: Role::User,
                 content: "hi".into(),
                 tool_call_id: None,
+                tool_calls: Vec::new(),
             }],
             &[],
             &GenerationSettings::default(),
