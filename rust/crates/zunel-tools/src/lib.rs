@@ -8,6 +8,7 @@ pub mod path_policy;
 mod registry;
 pub mod schema;
 pub mod search;
+pub mod shell;
 pub mod ssrf;
 mod tool;
 
