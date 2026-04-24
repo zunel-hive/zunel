@@ -2783,6 +2783,7 @@ name = "zunel"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "futures",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
@@ -2791,6 +2792,7 @@ dependencies = [
  "zunel-config",
  "zunel-core",
  "zunel-providers",
+ "zunel-util",
 ]
 
 [[package]]

@@ -183,10 +183,12 @@ struct StreamChunk {
 struct StreamChoice {
     #[serde(default)]
     delta: StreamDelta,
-    // Deserialized off the wire for forward-compat with stop-reason routing
-    // (tool_calls, length, content_filter) in a later slice. Not consumed yet.
+    /// Carried through from the provider and logged at `debug` level on
+    /// the terminal chunk so operators can see `"stop"`, `"length"`,
+    /// `"tool_calls"`, or `"content_filter"` in traces. Slice 3's tool
+    /// loop will read this to route control flow; until then it's an
+    /// observability signal only.
     #[serde(default)]
-    #[allow(dead_code)]
     finish_reason: Option<String>,
 }
 
@@ -219,6 +221,7 @@ impl OpenAICompatProvider {
             let mut buffer = SseBuffer::new();
             let mut accumulated = String::new();
             let mut final_usage: Option<WireUsage> = None;
+            let mut final_finish_reason: Option<String> = None;
             let mut stream = response.bytes_stream();
 
             use futures::StreamExt;
@@ -228,6 +231,11 @@ impl OpenAICompatProvider {
                 for event in events {
                     match event {
                         None => {
+                            tracing::debug!(
+                                model = %model,
+                                finish_reason = final_finish_reason.as_deref().unwrap_or("<none>"),
+                                "openai-compat: stream done",
+                            );
                             let response = LLMResponse {
                                 content: if accumulated.is_empty() {
                                     None
@@ -243,12 +251,15 @@ impl OpenAICompatProvider {
                         Some(payload) => {
                             let parsed: StreamChunk = serde_json::from_str(&payload)
                                 .map_err(|e| Error::Parse(format!("chunk decode: {e}")))?;
-                            for choice in &parsed.choices {
-                                if let Some(ref text) = choice.delta.content {
+                            for choice in parsed.choices {
+                                if let Some(text) = choice.delta.content {
                                     if !text.is_empty() {
-                                        accumulated.push_str(text);
-                                        yield StreamEvent::ContentDelta(text.clone());
+                                        accumulated.push_str(&text);
+                                        yield StreamEvent::ContentDelta(text);
                                     }
+                                }
+                                if let Some(reason) = choice.finish_reason {
+                                    final_finish_reason = Some(reason);
                                 }
                             }
                             if let Some(u) = parsed.usage {
@@ -258,6 +269,11 @@ impl OpenAICompatProvider {
                     }
                 }
             }
+            tracing::debug!(
+                model = %model,
+                finish_reason = final_finish_reason.as_deref().unwrap_or("<none>"),
+                "openai-compat: stream ended without [DONE]",
+            );
             let response = LLMResponse {
                 content: if accumulated.is_empty() { None } else { Some(accumulated) },
                 tool_calls: Vec::new(),

@@ -9,6 +9,23 @@ use zunel_providers::{ChatMessage, GenerationSettings, LLMProvider, Role, Stream
 use crate::error::Result;
 use crate::session::{ChatRole, Session, SessionManager};
 
+/// Maximum number of prior messages replayed to the provider per turn.
+/// Matches Python's `AgentLoop` history cap in `zunel/agent/loop.py`.
+/// Older messages beyond this window are retained on disk (via
+/// `Session`) but are not sent to the LLM; slice 3's context builder
+/// replaces this fixed window with a token-budget-aware trimmer.
+const HISTORY_LIMIT: usize = 500;
+
+/// Outcome of a single agent turn.
+///
+/// - `content`: the assistant text the provider produced (possibly empty
+///   if the model returned no text, e.g. a pure tool-call turn in a
+///   later slice).
+/// - `tools_used`: names of tools the agent invoked during the turn.
+///   Always empty in slice 2 — the tool loop lands in slice 3.
+/// - `messages`: the ordered message history that was sent to the
+///   provider for this turn (user-only for `process_direct`, the
+///   truncated session history for `process_streamed`).
 #[derive(Debug, Clone)]
 pub struct RunResult {
     pub content: String,
@@ -100,7 +117,7 @@ impl AgentLoop {
             .unwrap_or_else(|| Session::new(session_key));
 
         session.add_message(ChatRole::User, message);
-        let history = session.get_history(500);
+        let history = session.get_history(HISTORY_LIMIT);
         let chat_messages = history_to_chat_messages(&history);
 
         let settings = self.settings();
@@ -127,7 +144,8 @@ impl AgentLoop {
                 }
             }
             // Best-effort: if the sink is dropped, keep consuming the
-            // stream so the HTTP connection isn't hung.
+            // provider stream so the underlying transport (HTTP today,
+            // something else tomorrow) can finish cleanly.
             let _ = sink.send(event).await;
         }
         drop(stream);

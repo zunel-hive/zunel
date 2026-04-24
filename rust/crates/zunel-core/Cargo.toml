@@ -21,7 +21,6 @@ zunel-providers.workspace = true
 zunel-util.workspace = true
 
 [dev-dependencies]
-async-trait = "0.1"
 async-stream.workspace = true
 wiremock.workspace = true
 tempfile.workspace = true

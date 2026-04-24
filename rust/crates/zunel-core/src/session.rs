@@ -152,9 +152,7 @@ impl Session {
             "last_consolidated": self.last_consolidated,
         })
     }
-}
 
-impl Session {
     /// Test-only constructor for deterministic fixtures.
     #[doc(hidden)]
     pub fn for_test(
@@ -191,22 +189,20 @@ impl SessionManager {
         Self { sessions_dir }
     }
 
-    /// Python-compat: replace the first `:` with `_` so keys like
-    /// `cli:direct` become `cli_direct.jsonl`.
+    /// Python-compat: replace path-unsafe characters with `_` and trim
+    /// surrounding whitespace. Mirrors `zunel/utils/helpers.py::safe_filename`
+    /// applied to `key.replace(":", "_")`. The unsafe set matches Python's
+    /// `_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')`, so ordinary letters,
+    /// digits, spaces, periods, and non-ASCII codepoints pass through
+    /// unchanged, keeping Rust-generated session filenames byte-compatible
+    /// with Python-generated ones.
     fn safe_key(key: &str) -> String {
-        // Matches Python's `safe_filename(key.replace(":", "_"))` for
-        // the restricted character set slice 2 uses (alphanumeric + `_`).
-        let replaced = key.replacen(':', "_", 1);
-        replaced
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect()
+        const UNSAFE: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+        key.chars()
+            .map(|c| if UNSAFE.contains(&c) { '_' } else { c })
+            .collect::<String>()
+            .trim()
+            .to_string()
     }
 
     fn session_path(&self, key: &str) -> PathBuf {
@@ -360,13 +356,39 @@ impl serde_json::ser::Formatter for PythonCompactFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
 
     #[test]
     fn iso_format_matches_python_shape() {
-        let ts: DateTime<Local> =
-            chrono::TimeZone::with_ymd_and_hms(&Local, 2026, 4, 24, 10, 58, 27).unwrap();
+        // Non-zero microseconds prove the `%.6f` format actually carries
+        // sub-second precision through to the output, not just that the
+        // happy path prints six zeros.
+        let naive = NaiveDate::from_ymd_opt(2026, 4, 24)
+            .unwrap()
+            .and_hms_micro_opt(10, 58, 27, 123_456)
+            .unwrap();
+        let ts: DateTime<Local> = naive.and_local_timezone(Local).unwrap();
         let iso = naive_local_iso(ts);
-        // Microsecond precision, no tz suffix.
-        assert_eq!(iso, "2026-04-24T10:58:27.000000");
+        // Microsecond precision, no tz suffix — matches Python's
+        // `datetime.now().isoformat()` for non-zero-microsecond values.
+        assert_eq!(iso, "2026-04-24T10:58:27.123456");
+    }
+
+    #[test]
+    fn safe_key_matches_python_safe_filename() {
+        // Colons become underscores (SessionManager's standard namespacing).
+        assert_eq!(SessionManager::safe_key("cli:direct"), "cli_direct");
+        assert_eq!(SessionManager::safe_key("agent:foo:bar"), "agent_foo_bar");
+        // Windows-unsafe chars are stripped, everything else passes through,
+        // including periods, spaces, and non-ASCII codepoints.
+        assert_eq!(
+            SessionManager::safe_key("hello world.txt"),
+            "hello world.txt"
+        );
+        assert_eq!(SessionManager::safe_key("dir/name"), "dir_name");
+        assert_eq!(SessionManager::safe_key("a<b>c|d?e*f"), "a_b_c_d_e_f");
+        assert_eq!(SessionManager::safe_key("émoji🎉"), "émoji🎉");
+        // Surrounding whitespace is trimmed, like Python's .strip().
+        assert_eq!(SessionManager::safe_key("  padded  "), "padded");
     }
 }
