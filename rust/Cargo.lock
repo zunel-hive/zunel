@@ -2380,8 +2380,12 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 name = "zunel"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
+ "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "wiremock",
  "zunel-config",
  "zunel-core",
  "zunel-providers",

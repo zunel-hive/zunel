@@ -13,3 +13,10 @@ zunel-core.workspace = true
 zunel-providers.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
