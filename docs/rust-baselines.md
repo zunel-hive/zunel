@@ -119,3 +119,26 @@ magnitude below Python.
   metric re-measured on the slice 1 binary built from the
   `rust-slice-1` tag.
 
+## Slice 2 Exit
+
+- Commit range: `5a126ac..e65c1b8` (18 commits, plus this docs commit)
+- Test count: 63 (slice 1's 26 plus slice 2 additions: workspace paths,
+  session + session manager, SSE parser, streaming provider default,
+  OpenAI-compat streaming, agent-loop streaming, command router,
+  one-shot streaming CLI integration, interactive REPL integration,
+  facade stream test, plus additional coverage added during review)
+- Release build: clean on `cargo build --release --workspace`
+- Clippy: clean with `-D warnings` on `--all-targets`
+- Rustfmt: clean on `cargo fmt --check`
+- cargo-deny: advisories + bans + licenses + sources all ok
+- Static binary: **3.7 MiB** (macOS arm64, stripped; +0.6 MiB vs slice 1)
+- Startup delta vs slice 1: **+1.6%** (51.9 ms vs 51.1 ms), well inside
+  the ≤10% budget.
+- Peak RSS delta vs slice 1: **+4.17 MiB** (6.84 MiB vs 2.67 MiB);
+  still 8.25× less than Python (56.4 MiB).
+- Interactive smoke-test (`zunel agent`, `/help`, `/status`, `/clear`,
+  `/restart`, Ctrl+C) deferred to human verification — requires live
+  API credentials which subagents should not use.
+- Local tag: `rust-slice-2` (not pushed; local-only until user authorizes)
+- Next: slice 3 spec (local tools + skills + context builder).
+
