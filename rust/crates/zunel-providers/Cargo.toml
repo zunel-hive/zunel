@@ -17,5 +17,6 @@ tracing.workspace = true
 zunel-config.workspace = true
 
 [dev-dependencies]
-wiremock.workspace = true
+wiremock = { workspace = true }
+insta = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

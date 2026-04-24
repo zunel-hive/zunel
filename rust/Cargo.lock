@@ -2414,6 +2414,7 @@ name = "zunel-providers"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "insta",
  "reqwest",
  "serde",
  "serde_json",

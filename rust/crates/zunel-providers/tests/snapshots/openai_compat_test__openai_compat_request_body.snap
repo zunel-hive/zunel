@@ -1,0 +1,19 @@
+---
+source: crates/zunel-providers/tests/openai_compat_test.rs
+expression: body
+---
+{
+  "max_tokens": 512,
+  "messages": [
+    {
+      "content": "be brief",
+      "role": "system"
+    },
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-x",
+  "temperature": 0.2
+}
