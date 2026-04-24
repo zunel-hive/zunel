@@ -4,6 +4,7 @@ mod base;
 mod build;
 mod error;
 mod openai_compat;
+pub mod sse;
 
 pub use base::{
     ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, StreamEvent,
