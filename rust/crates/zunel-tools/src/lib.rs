@@ -3,6 +3,7 @@
 
 pub mod error;
 pub mod file_state;
+pub mod fs;
 pub mod path_policy;
 mod registry;
 pub mod schema;
