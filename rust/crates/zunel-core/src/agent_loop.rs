@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use futures::StreamExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use zunel_config::AgentDefaults;
 use zunel_providers::{ChatMessage, GenerationSettings, LLMProvider, Role, StreamEvent};
 
+use crate::approval::{AllowAllApprovalHandler, ApprovalHandler};
 use crate::error::Result;
+use crate::runner::{AgentRunSpec, AgentRunner};
 use crate::session::{ChatRole, Session, SessionManager};
+use zunel_tools::ToolRegistry;
 
 /// Maximum number of prior messages replayed to the provider per turn.
 /// Matches Python's `AgentLoop` history cap in `zunel/agent/loop.py`.
@@ -47,6 +49,9 @@ pub struct AgentLoop {
     provider: Arc<dyn LLMProvider>,
     defaults: AgentDefaults,
     sessions: Option<Arc<SessionManager>>,
+    tools: ToolRegistry,
+    approval: Arc<dyn ApprovalHandler>,
+    workspace: std::path::PathBuf,
 }
 
 impl AgentLoop {
@@ -56,6 +61,9 @@ impl AgentLoop {
             provider,
             defaults,
             sessions: None,
+            tools: ToolRegistry::new(),
+            approval: Arc::new(AllowAllApprovalHandler),
+            workspace: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
         }
     }
 
@@ -69,7 +77,26 @@ impl AgentLoop {
             provider,
             defaults,
             sessions: Some(Arc::new(sessions)),
+            tools: ToolRegistry::new(),
+            approval: Arc::new(AllowAllApprovalHandler),
+            workspace: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
         }
+    }
+
+    /// Slice 3 — inject a tool registry + approval handler.
+    pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    pub fn with_approval(mut self, approval: Arc<dyn ApprovalHandler>) -> Self {
+        self.approval = approval;
+        self
+    }
+
+    pub fn with_workspace(mut self, workspace: std::path::PathBuf) -> Self {
+        self.workspace = workspace;
+        self
     }
 
     fn settings(&self) -> GenerationSettings {
@@ -118,52 +145,56 @@ impl AgentLoop {
 
         session.add_message(ChatRole::User, message);
         let history = session.get_history(HISTORY_LIMIT);
-        let chat_messages = history_to_chat_messages(&history);
+        let initial_messages = history_to_chat_messages(&history);
+        let starting_len = initial_messages.len();
 
-        let settings = self.settings();
         tracing::debug!(
             model = %self.defaults.model,
-            history_len = chat_messages.len(),
+            history_len = initial_messages.len(),
             "agent_loop: streaming",
         );
 
-        let mut stream =
-            self.provider
-                .generate_stream(&self.defaults.model, &chat_messages, &[], &settings);
+        let runner = AgentRunner::new(
+            self.provider.clone(),
+            self.tools.clone(),
+            self.approval.clone(),
+        );
+        let result = runner
+            .run(
+                AgentRunSpec {
+                    initial_messages,
+                    model: self.defaults.model.clone(),
+                    max_iterations: 15,
+                    workspace: self.workspace.clone(),
+                    session_key: session_key.into(),
+                    approval_required: false,
+                    approval_scope: crate::ApprovalScope::default(),
+                },
+                sink,
+            )
+            .await?;
 
-        let mut accumulated = String::new();
-        let mut final_content: Option<String> = None;
-
-        while let Some(event) = stream.next().await {
-            let event = event?;
-            match &event {
-                StreamEvent::ContentDelta(delta) => accumulated.push_str(delta),
-                StreamEvent::Done(resp) => {
-                    final_content =
-                        Some(resp.content.clone().unwrap_or_else(|| accumulated.clone()));
-                }
-                // Slice 2's inline runner does not dispatch tool calls;
-                // AgentRunner (Task 13) owns that logic. We still forward
-                // deltas to the sink so the REPL can render progress.
-                StreamEvent::ToolCallDelta { .. } => {}
-            }
-            // Best-effort: if the sink is dropped, keep consuming the
-            // provider stream so the underlying transport (HTTP today,
-            // something else tomorrow) can finish cleanly.
-            let _ = sink.send(event).await;
+        for msg in result.messages.iter().skip(starting_len) {
+            persist_runner_message(&mut session, msg);
         }
-        drop(stream);
-
-        let content = final_content.unwrap_or(accumulated);
-        session.add_message(ChatRole::Assistant, &content);
         sessions.save(&session)?;
 
         Ok(RunResult {
-            content,
-            tools_used: Vec::new(),
-            messages: chat_messages,
+            content: result.content,
+            tools_used: result.tools_used,
+            messages: result.messages,
         })
     }
+}
+
+fn persist_runner_message(session: &mut Session, msg: &ChatMessage) {
+    let role = match msg.role {
+        Role::User => ChatRole::User,
+        Role::Assistant => ChatRole::Assistant,
+        Role::System => ChatRole::System,
+        Role::Tool => ChatRole::Tool,
+    };
+    session.add_message(role, &msg.content);
 }
 
 /// Convert persisted `Value` messages (from Session::get_history) into

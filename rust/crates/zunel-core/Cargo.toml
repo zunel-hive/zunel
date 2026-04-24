@@ -19,6 +19,7 @@ tracing.workspace = true
 zunel-bus.workspace = true
 zunel-config.workspace = true
 zunel-providers.workspace = true
+zunel-tools.workspace = true
 zunel-util.workspace = true
 
 [dev-dependencies]

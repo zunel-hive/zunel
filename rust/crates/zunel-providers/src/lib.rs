@@ -2,7 +2,7 @@
 
 mod base;
 mod build;
-mod error;
+pub mod error;
 mod openai_compat;
 pub mod sse;
 mod tool_call_accumulator;

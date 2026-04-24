@@ -17,6 +17,9 @@ pub enum Error {
 
     #[error("approval timed out after {after_s}s for tool {tool}")]
     ApprovalTimeout { tool: String, after_s: u64 },
+
+    #[error("failed to assemble streamed tool call: {0}")]
+    ToolCallAssembly(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

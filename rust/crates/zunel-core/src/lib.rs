@@ -4,6 +4,7 @@ mod agent_loop;
 pub mod approval;
 pub mod command;
 mod error;
+pub mod runner;
 mod session;
 
 pub use agent_loop::{AgentLoop, RunResult};
@@ -13,4 +14,5 @@ pub use approval::{
 };
 pub use command::{CommandContext, CommandOutcome, CommandRouter};
 pub use error::{Error, Result};
+pub use runner::{AgentRunResult, AgentRunSpec, AgentRunner, StopReason};
 pub use session::{ChatRole, Session, SessionManager};
