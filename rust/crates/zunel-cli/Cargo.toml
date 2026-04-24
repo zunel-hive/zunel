@@ -23,6 +23,7 @@ zunel-bus.workspace = true
 zunel-config.workspace = true
 zunel-core.workspace = true
 zunel-providers.workspace = true
+zunel-util.workspace = true
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

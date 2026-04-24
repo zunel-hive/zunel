@@ -2823,6 +2823,7 @@ dependencies = [
  "zunel-config",
  "zunel-core",
  "zunel-providers",
+ "zunel-util",
 ]
 
 [[package]]

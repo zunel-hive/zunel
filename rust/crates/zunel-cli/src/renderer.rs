@@ -1,8 +1,3 @@
-// `#![allow(dead_code)]` is lifted in Task 11 when the one-shot
-// `agent -m` command wires `StreamingRenderer::start().drive(rx)`.
-// Kept here so this commit stays clippy-clean in isolation.
-#![allow(dead_code)]
-
 use std::io::{self, Write};
 
 use tokio::sync::mpsc::Receiver;
@@ -29,8 +24,7 @@ impl StreamingRenderer {
     }
 
     pub async fn drive(mut self, mut rx: Receiver<StreamEvent>) -> io::Result<()> {
-        let stdout = io::stdout();
-        let mut handle = stdout.lock();
+        let mut stdout = io::stdout();
 
         while let Some(event) = rx.recv().await {
             match event {
@@ -42,16 +36,16 @@ impl StreamingRenderer {
                         if let Some(spinner) = self.spinner.take() {
                             spinner.stop().await;
                         }
-                        writeln!(handle, "\nzunel:")?;
+                        writeln!(stdout, "\nzunel:")?;
                         self.header_printed = true;
                     }
-                    handle.write_all(text.as_bytes())?;
-                    handle.flush()?;
+                    stdout.write_all(text.as_bytes())?;
+                    stdout.flush()?;
                     self.wrote_anything = true;
                 }
                 StreamEvent::Done(_) => {
                     if self.wrote_anything {
-                        writeln!(handle)?;
+                        writeln!(stdout)?;
                     }
                 }
             }

@@ -24,14 +24,14 @@ fn sse_response(chunks: &[&str]) -> String {
 }
 
 #[tokio::test]
-async fn agent_one_shot_prints_provider_reply() {
+async fn one_shot_streams_content_to_stdout() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("Content-Type", "text/event-stream")
-                .set_body_string(sse_response(&["integration ok"])),
+                .set_body_string(sse_response(&["strea", "ming ", "ok"])),
         )
         .mount(&server)
         .await;
@@ -63,5 +63,12 @@ async fn agent_one_shot_prints_provider_reply() {
 
     assert
         .success()
-        .stdout(predicates::str::contains("integration ok"));
+        .stdout(predicates::str::contains("streaming ok"));
+
+    // Session should now be persisted at <workspace>/sessions/cli_direct.jsonl
+    let session_file = tmp.path().join("sessions/cli_direct.jsonl");
+    assert!(session_file.exists(), "session file missing at {session_file:?}");
+    let body = fs::read_to_string(&session_file).unwrap();
+    assert!(body.contains("\"content\": \"hi\""));
+    assert!(body.contains("\"content\": \"streaming ok\""));
 }
