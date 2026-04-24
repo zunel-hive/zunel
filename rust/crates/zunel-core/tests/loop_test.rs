@@ -43,6 +43,7 @@ async fn process_direct_returns_provider_content() {
         temperature: None,
         max_tokens: None,
         reasoning_effort: None,
+        workspace: None,
     };
     let agent_loop = AgentLoop::new(provider, defaults);
     let result = agent_loop.process_direct("ping").await.unwrap();
