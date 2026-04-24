@@ -6,6 +6,7 @@ pub mod command;
 mod error;
 pub mod runner;
 mod session;
+pub mod trim;
 
 pub use agent_loop::{AgentLoop, RunResult};
 pub use approval::{

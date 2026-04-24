@@ -16,6 +16,10 @@ use zunel_tools::{ToolContext, ToolRegistry};
 use crate::approval::{
     tool_requires_approval, ApprovalDecision, ApprovalHandler, ApprovalRequest, ApprovalScope,
 };
+use crate::trim::{
+    apply_tool_result_budget, backfill_missing_tool_results, chat_message_to_value,
+    drop_orphan_tool_results, microcompact_old_tool_results, snip_history, value_to_chat_message,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
@@ -106,10 +110,14 @@ impl AgentRunner {
 
         'outer: for iteration in 0..max_iter {
             tracing::debug!(iteration, "agent iteration");
+            let messages_for_model = trim_messages_for_provider(&messages)?;
             let (content, finish_reason, calls) = {
-                let stream =
-                    self.provider
-                        .generate_stream(&spec.model, &messages, &tool_defs, &settings);
+                let stream = self.provider.generate_stream(
+                    &spec.model,
+                    &messages_for_model,
+                    &tool_defs,
+                    &settings,
+                );
                 futures::pin_mut!(stream);
                 let mut acc = ToolCallAccumulator::default();
                 let mut content = String::new();
@@ -210,6 +218,27 @@ fn tool_result_message(tool_call_id: &str, _name: &str, content: &str) -> ChatMe
 
 fn describe_call(tc: &ToolCallRequest) -> String {
     format!("{}({})", tc.name, tc.arguments)
+}
+
+/// Apply the five-stage trim pipeline before sending history to the
+/// provider. Operates on wire-format `Value` objects since that's the
+/// shape the trim helpers (and the Python port) work with.
+fn trim_messages_for_provider(messages: &[ChatMessage]) -> Result<Vec<ChatMessage>, crate::Error> {
+    const TOOL_RESULT_BUDGET_CHARS: usize = 16_000;
+    const HISTORY_TOKEN_BUDGET: usize = 65_536 - 1_024 - 4_096;
+
+    let values: Vec<serde_json::Value> = messages.iter().map(chat_message_to_value).collect();
+    let values = drop_orphan_tool_results(&values);
+    let values = backfill_missing_tool_results(&values);
+    let values = microcompact_old_tool_results(&values);
+    let values = apply_tool_result_budget(&values, TOOL_RESULT_BUDGET_CHARS);
+    let values = snip_history(&values, HISTORY_TOKEN_BUDGET);
+
+    values
+        .iter()
+        .map(value_to_chat_message)
+        .collect::<Result<_, _>>()
+        .map_err(crate::Error::ToolCallAssembly)
 }
 
 fn schema_from_definition(def: serde_json::Value) -> zunel_providers::ToolSchema {
