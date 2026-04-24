@@ -66,3 +66,56 @@ Update this file at the end of every slice.
 - Local tag: `rust-slice-1` (not pushed; local-only until user authorizes)
 - Next: slice 2 spec (interactive REPL + streaming + slash commands).
 
+## Slice 2
+
+Measurements after slice 2 (REPL + streaming + slash commands + session
+persistence). Methodology unchanged from slice 1. Slice 1 Rust numbers
+in the tables below were re-measured on the same machine at the same
+time as the slice 2 numbers, so the two Rust rows are directly
+comparable; the slice 1 numbers reported in the section above are from
+the original slice 1 run and differ by noise.
+
+### Startup
+
+| Implementation       | Mean     | Min      | Max      |
+| -------------------- | -------- | -------- | -------- |
+| Python zunel         | 348.7 ms | 339.4 ms | 371.6 ms |
+| Rust zunel (slice 1) |  51.1 ms |  44.9 ms | 110.5 ms |
+| Rust zunel (slice 2) |  51.9 ms |  46.7 ms |  55.9 ms |
+
+**Rust slice 2 is 6.72× ± 0.31× faster** than Python. Regression vs
+slice 1 is +0.8 ms (+1.6%), comfortably inside the ≤10% budget.
+
+### Memory (peak RSS)
+
+| Implementation       | Peak RSS |
+| -------------------- | -------- |
+| Python zunel         | 56.4 MiB |
+| Rust zunel (slice 1) |  2.67 MiB |
+| Rust zunel (slice 2) |  6.84 MiB |
+
+Rust slice 2 uses **8.25× less memory** than Python. Slice 2 adds
+~4.17 MiB of RSS vs slice 1 from linking `reedline`, `crossterm`,
+`futures`, `async-stream`, and `chrono` into the binary (their text
+pages fault in during clap's argument pass even though `--version`
+exits before any of them are actually used). Still an order of
+magnitude below Python.
+
+### Binary size
+
+- Rust release (`rust/target/release/zunel`, stripped, arm64 macOS): **3.7 MiB**
+- Delta vs slice 1: **+0.6 MiB** (+19%), attributable to the five
+  new dependencies listed in the memory note above.
+
+### Notes
+
+- New deps added this slice: `reedline`, `crossterm` (transitive via
+  reedline), `futures`, `async-stream`, `chrono`.
+- No new runtime startup work; the agent still boots via clap + config
+  load + provider build before `--version` prints. Startup regression
+  budget is ≤10% of slice 1; actual regression is 1.6%.
+- RSS measured via `/usr/bin/time -l <binary> --version` (five
+  samples, median reported). Slice 1 Rust row above uses the same
+  metric re-measured on the slice 1 binary built from the
+  `rust-slice-1` tag.
+
