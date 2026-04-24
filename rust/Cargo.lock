@@ -2429,6 +2429,7 @@ name = "zunel-util"
 version = "0.2.0"
 dependencies = [
  "dirs",
+ "tempfile",
  "thiserror 1.0.69",
  "tracing",
 ]
