@@ -147,6 +147,14 @@ impl ResponsesStreamParser {
         }
     }
 
+    pub fn finish(&mut self) -> Result<Vec<StreamEvent>> {
+        Ok(vec![self.done_event(
+            self.finish_reason
+                .clone()
+                .unwrap_or_else(|| "stop".to_string()),
+        )])
+    }
+
     fn accept_output_item_added(&mut self, event: &Value) -> Result<Vec<StreamEvent>> {
         let item = event.get("item").unwrap_or(&Value::Null);
         if item.get("type").and_then(Value::as_str) != Some("function_call") {
@@ -255,6 +263,10 @@ impl ResponsesStreamParser {
         let finish_reason = map_finish_reason(status).to_string();
         self.finish_reason = Some(finish_reason.clone());
 
+        Ok(vec![self.done_event(finish_reason)])
+    }
+
+    fn done_event(&self, finish_reason: String) -> StreamEvent {
         let mut tool_calls = Vec::with_capacity(self.calls_by_id.len());
         for (call_id, call) in &self.calls_by_id {
             let args_raw = if call.arguments.is_empty() {
@@ -273,7 +285,7 @@ impl ResponsesStreamParser {
         }
         tool_calls.sort_by_key(|call| call.index);
 
-        Ok(vec![StreamEvent::Done(LLMResponse {
+        StreamEvent::Done(LLMResponse {
             content: if self.content.is_empty() {
                 None
             } else {
@@ -282,7 +294,7 @@ impl ResponsesStreamParser {
             tool_calls,
             usage: Usage::default(),
             finish_reason: Some(finish_reason),
-        })])
+        })
     }
 }
 

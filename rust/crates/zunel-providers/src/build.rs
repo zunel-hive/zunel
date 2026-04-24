@@ -3,6 +3,7 @@ use std::sync::Arc;
 use zunel_config::Config;
 
 use crate::base::LLMProvider;
+use crate::codex::CodexProvider;
 use crate::error::{Error, Result};
 use crate::openai_compat::OpenAICompatProvider;
 
@@ -31,9 +32,10 @@ pub fn build_provider(config: &Config) -> Result<Arc<dyn LLMProvider>> {
             )?;
             Ok(Arc::new(provider))
         }
-        "codex" => Err(Error::Config(
-            "codex provider lands in slice 4; use 'custom' for slice 1".into(),
-        )),
+        "codex" => {
+            let codex = config.providers.codex.clone().unwrap_or_default();
+            Ok(Arc::new(CodexProvider::new(codex.api_base)?))
+        }
         other => Err(Error::Config(format!("unknown provider '{other}'"))),
     }
 }

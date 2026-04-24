@@ -1,4 +1,6 @@
-use zunel_config::{AgentDefaults, AgentsConfig, Config, CustomProvider, ProvidersConfig};
+use zunel_config::{
+    AgentDefaults, AgentsConfig, CodexProvider, Config, CustomProvider, ProvidersConfig,
+};
 use zunel_providers::build_provider;
 
 fn config_with_custom() -> Config {
@@ -32,15 +34,14 @@ fn builds_custom_provider_from_config() {
 }
 
 #[test]
-fn errors_when_codex_requested_in_slice_1() {
+fn builds_codex_provider_without_requiring_api_key() {
     let mut cfg = config_with_custom();
     cfg.agents.defaults.provider = Some("codex".into());
     cfg.providers.custom = None;
-    let err = build_provider(&cfg).err().expect("expected Err");
-    assert!(
-        matches!(err, zunel_providers::Error::Config(ref m) if m.contains("codex")),
-        "got {err:?}"
-    );
+    cfg.providers.codex = Some(CodexProvider {
+        api_base: Some("https://chatgpt.example/backend-api/codex/responses".into()),
+    });
+    let _provider = build_provider(&cfg).expect("builds codex");
 }
 
 #[test]
