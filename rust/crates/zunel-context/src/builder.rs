@@ -16,29 +16,41 @@ const BOOTSTRAP_FILES: &[&str] = &["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"
 pub struct ContextBuilder {
     workspace: PathBuf,
     skills: SkillsLoader,
+    runtime: Option<String>,
 }
 
 impl ContextBuilder {
     pub fn new(workspace: PathBuf, skills: SkillsLoader) -> Self {
-        Self { workspace, skills }
+        Self {
+            workspace,
+            skills,
+            runtime: None,
+        }
+    }
+
+    /// Override the platform/runtime descriptor that gets baked into the
+    /// identity section (e.g. ``"macOS arm64, Python 3.13.5"``). When
+    /// unset we synthesize one from `std::env::consts`.
+    pub fn with_runtime(mut self, runtime: impl Into<String>) -> Self {
+        self.runtime = Some(runtime.into());
+        self
     }
 
     pub fn build_system_prompt(&self, channel: Option<&str>) -> Result<String> {
         let mut parts: Vec<String> = Vec::new();
 
-        let runtime = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        let identity = render_identity(&self.workspace.display().to_string(), &runtime, channel)?;
+        let runtime = self
+            .runtime
+            .clone()
+            .unwrap_or_else(default_runtime_descriptor);
+        let workspace_path = workspace_display(&self.workspace);
+        let policy = render_platform_policy(platform_system())?;
+        let identity = render_identity(&workspace_path, &runtime, &policy, channel)?;
         parts.push(identity);
 
-        let policy = render_platform_policy()?;
-        parts.push(policy);
-
-        for name in BOOTSTRAP_FILES {
-            let path = self.workspace.join(name);
-            if path.exists() {
-                let body = std::fs::read_to_string(&path).map_err(Error::from)?;
-                parts.push(format!("## {name}\n\n{}", body.trim_end()));
-            }
+        let bootstrap = self.load_bootstrap_files()?;
+        if !bootstrap.is_empty() {
+            parts.push(bootstrap);
         }
 
         let always = self.skills.get_always_skills()?;
@@ -55,6 +67,18 @@ impl ContextBuilder {
         }
 
         Ok(parts.join(SECTION_SEPARATOR))
+    }
+
+    fn load_bootstrap_files(&self) -> Result<String> {
+        let mut blocks: Vec<String> = Vec::new();
+        for name in BOOTSTRAP_FILES {
+            let path = self.workspace.join(name);
+            if path.exists() {
+                let body = std::fs::read_to_string(&path).map_err(Error::from)?;
+                blocks.push(format!("## {name}\n\n{body}"));
+            }
+        }
+        Ok(blocks.join("\n\n"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -112,6 +136,42 @@ impl ContextBuilder {
         messages.push(current);
         Ok(messages)
     }
+}
+
+fn workspace_display(p: &std::path::Path) -> String {
+    // Mirrors Python's `Path.expanduser().resolve()` semantics by
+    // canonicalising when the path exists; otherwise we just print the
+    // path as-is so callers (incl. tests) can pre-canonicalise.
+    match std::fs::canonicalize(p) {
+        Ok(canon) => canon.display().to_string(),
+        Err(_) => p.display().to_string(),
+    }
+}
+
+fn platform_system() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "Darwin"
+    } else if cfg!(target_os = "linux") {
+        "Linux"
+    } else {
+        "POSIX"
+    }
+}
+
+fn default_runtime_descriptor() -> String {
+    let arch = std::env::consts::ARCH;
+    let os_label = match std::env::consts::OS {
+        "macos" => "macOS",
+        "linux" => "Linux",
+        "windows" => "Windows",
+        other => other,
+    };
+    // Rust binary doesn't ship Python; report Rust runtime so the prompt
+    // tells the truth when no override is provided. The snapshot test
+    // overrides this for byte-compat against the Python fixture.
+    format!("{os_label} {arch}, Rust runtime")
 }
 
 fn build_runtime_block(

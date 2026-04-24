@@ -1,9 +1,10 @@
-## Platform Policy
-
-- Prefer built-in tools (`read_file`, `write_file`, `edit_file`, `list_dir`,
-  `glob`, `grep`) over shelling out with `cat`, `sed`, `find`, or `grep`.
-- Never delete or rename files without an explicit user request.
-- When you use `exec`, pass `--yes` / `-y` where possible to avoid
-  interactive prompts that will time out.
-- When uncertain about a file's current state, `read_file` before
-  `edit_file`.
+{% if system == 'Windows' %}
+## Platform Policy (Windows)
+- You are running on Windows. Do not assume GNU tools like `grep`, `sed`, or `awk` exist.
+- Prefer Windows-native commands or file tools when they are more reliable.
+- If terminal output is garbled, retry with UTF-8 output enabled.
+{% else %}
+## Platform Policy (POSIX)
+- You are running on a POSIX system. Prefer UTF-8 and standard shell tools.
+- Use file tools when they are simpler or more reliable than shell commands.
+{% endif %}

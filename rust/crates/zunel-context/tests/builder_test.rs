@@ -14,10 +14,12 @@ fn system_prompt_contains_identity_and_skills_header_when_no_skills_present() {
     let tmp = tempdir().unwrap();
     let b = builder(tmp.path());
     let prompt = b.build_system_prompt(None).unwrap();
+    // Identity uses the Python-parity heading scheme.
     assert!(
-        prompt.contains("You are zunel"),
+        prompt.contains("## Runtime") && prompt.contains("## Workspace"),
         "prompt did not include identity: {prompt}"
     );
+    assert!(prompt.contains("## Platform Policy"));
     // No active-skills section when none are always-on.
     assert!(!prompt.contains("# Active Skills"));
 }
