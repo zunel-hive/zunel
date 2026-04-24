@@ -89,6 +89,78 @@ fn tools_section_round_trips() {
 }
 
 #[test]
+fn mcp_servers_section_round_trips_python_shape() {
+    let json = r#"{
+        "providers": {},
+        "agents": { "defaults": { "model": "m" } },
+        "tools": {
+            "mcpServers": {
+                "self": {
+                    "type": "stdio",
+                    "command": "python",
+                    "args": ["-m", "zunel.mcp.zunel_self"],
+                    "env": { "A": "B" },
+                    "headers": { "Authorization": "Bearer ${TOKEN}" },
+                    "toolTimeout": 30,
+                    "initTimeout": 10,
+                    "enabledTools": ["sessions", "mcp_self_status"],
+                    "oauth": {
+                        "enabled": true,
+                        "clientId": "client-1",
+                        "clientSecret": "secret-1",
+                        "authorizationUrl": "https://auth.example/authorize",
+                        "tokenUrl": "https://auth.example/token",
+                        "scope": "read write"
+                    }
+                }
+            }
+        }
+    }"#;
+    let cfg: zunel_config::Config = serde_json::from_str(json).unwrap();
+    let server = cfg.tools.mcp_servers.get("self").unwrap();
+    assert_eq!(server.transport_type.as_deref(), Some("stdio"));
+    assert_eq!(server.command.as_deref(), Some("python"));
+    assert_eq!(
+        server.args.as_deref(),
+        Some(&["-m".to_string(), "zunel.mcp.zunel_self".to_string()][..])
+    );
+    assert_eq!(server.env.as_ref().unwrap().get("A").unwrap(), "B");
+    assert_eq!(
+        server
+            .headers
+            .as_ref()
+            .unwrap()
+            .get("Authorization")
+            .unwrap(),
+        "Bearer ${TOKEN}"
+    );
+    assert_eq!(server.tool_timeout, Some(30));
+    assert_eq!(server.init_timeout, Some(10));
+    assert_eq!(
+        server.enabled_tools.as_deref(),
+        Some(&["sessions".to_string(), "mcp_self_status".to_string()][..])
+    );
+    let oauth = server.oauth.as_ref().unwrap();
+    assert!(oauth.enabled);
+    assert_eq!(oauth.client_id.as_deref(), Some("client-1"));
+    assert_eq!(oauth.client_secret.as_deref(), Some("secret-1"));
+    assert_eq!(
+        oauth.authorization_url.as_deref(),
+        Some("https://auth.example/authorize")
+    );
+    assert_eq!(
+        oauth.token_url.as_deref(),
+        Some("https://auth.example/token")
+    );
+    assert_eq!(oauth.scope.as_deref(), Some("read write"));
+
+    let value = serde_json::to_value(&cfg).unwrap();
+    assert!(value["tools"]["mcpServers"]["self"].is_object());
+    assert_eq!(value["tools"]["mcpServers"]["self"]["toolTimeout"], 30);
+    assert_eq!(value["tools"]["mcpServers"]["self"]["initTimeout"], 10);
+}
+
+#[test]
 fn unknown_fields_ignored() {
     let json = r#"{
         "providers": {},

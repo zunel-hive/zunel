@@ -71,6 +71,8 @@ pub struct ToolsConfig {
     pub exec: ExecToolsConfig,
     pub web: WebToolsConfig,
     pub filesystem: FilesystemToolsConfig,
+    #[serde(rename = "mcpServers")]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -93,4 +95,31 @@ pub struct WebToolsConfig {
 #[serde(default)]
 pub struct FilesystemToolsConfig {
     pub media_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct McpServerConfig {
+    #[serde(rename = "type")]
+    pub transport_type: Option<String>,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub env: Option<BTreeMap<String, String>>,
+    pub url: Option<String>,
+    pub headers: Option<BTreeMap<String, String>>,
+    pub tool_timeout: Option<u64>,
+    pub init_timeout: Option<u64>,
+    pub enabled_tools: Option<Vec<String>>,
+    pub oauth: Option<McpOAuthConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct McpOAuthConfig {
+    pub enabled: bool,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub authorization_url: Option<String>,
+    pub token_url: Option<String>,
+    pub scope: Option<String>,
 }

@@ -13,5 +13,6 @@ pub use paths::{
 };
 pub use schema::{
     AgentDefaults, AgentsConfig, CodexProvider, Config, CustomProvider, ExecToolsConfig,
-    FilesystemToolsConfig, ProvidersConfig, ToolsConfig, WebToolsConfig,
+    FilesystemToolsConfig, McpOAuthConfig, McpServerConfig, ProvidersConfig, ToolsConfig,
+    WebToolsConfig,
 };
