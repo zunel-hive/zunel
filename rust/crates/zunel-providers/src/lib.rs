@@ -5,6 +5,7 @@ mod build;
 pub mod codex;
 pub mod error;
 mod openai_compat;
+pub mod responses;
 pub mod sse;
 mod tool_call_accumulator;
 
