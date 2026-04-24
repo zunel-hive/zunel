@@ -12,6 +12,11 @@ pub mod shell;
 pub mod ssrf;
 mod tool;
 pub mod web;
+mod web_search_providers;
+
+pub use web_search_providers::{
+    BraveProvider, DuckDuckGoProvider, StubProvider, WebSearchProvider, WebSearchResult,
+};
 
 pub use error::{Error, Result};
 pub use registry::ToolRegistry;

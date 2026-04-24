@@ -6,6 +6,9 @@ use serde_json::{json, Value};
 
 use crate::ssrf::validate_url_target;
 use crate::tool::{Tool, ToolContext, ToolResult};
+use crate::web_search_providers::{
+    BraveProvider, DuckDuckGoProvider, StubProvider, WebSearchProvider,
+};
 
 pub struct WebFetchTool {
     client: reqwest::Client,
@@ -89,6 +92,71 @@ impl Tool for WebFetchTool {
             ToolResult::ok(md)
         } else {
             ToolResult::ok(body)
+        }
+    }
+}
+
+pub struct WebSearchTool {
+    provider: Box<dyn WebSearchProvider>,
+}
+
+impl WebSearchTool {
+    pub fn new(provider: Box<dyn WebSearchProvider>) -> Self {
+        Self { provider }
+    }
+
+    pub fn brave(api_key: String) -> Self {
+        Self::new(Box::new(BraveProvider::new(api_key)))
+    }
+
+    pub fn brave_with_endpoint(api_key: String, endpoint: String) -> Self {
+        Self::new(Box::new(BraveProvider::with_endpoint(api_key, endpoint)))
+    }
+
+    pub fn duckduckgo() -> Self {
+        Self::new(Box::new(DuckDuckGoProvider::new()))
+    }
+
+    pub fn stub(name: &'static str) -> Self {
+        Self::new(Box::new(StubProvider {
+            provider_name: name,
+        }))
+    }
+}
+
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn name(&self) -> &'static str {
+        "web_search"
+    }
+    fn description(&self) -> &'static str {
+        "Search the web and return a short list of results (title, URL, snippet)."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "n": {"type": "integer", "default": 5},
+            },
+            "required": ["query"],
+        })
+    }
+    fn concurrency_safe(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> ToolResult {
+        let Some(query) = args.get("query").and_then(Value::as_str) else {
+            return ToolResult::err("web_search: missing query".to_string());
+        };
+        let n = args.get("n").and_then(Value::as_u64).unwrap_or(5) as usize;
+        match self.provider.search(query, n).await {
+            Ok(results) => {
+                let rendered: Vec<String> = results.iter().map(|r| r.render()).collect();
+                ToolResult::ok(rendered.join("\n\n"))
+            }
+            Err(e) => ToolResult::err(format!("web_search: {e}")),
         }
     }
 }
