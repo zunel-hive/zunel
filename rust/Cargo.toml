@@ -5,6 +5,7 @@ members = [
     "crates/zunel-bus",
     "crates/zunel-util",
     "crates/zunel-providers",
+    "crates/zunel-tokens",
     "crates/zunel-core",
     "crates/zunel-cli",
     "crates/zunel",
@@ -64,7 +65,11 @@ zunel-config = { path = "crates/zunel-config", version = "=0.2.0" }
 zunel-bus = { path = "crates/zunel-bus", version = "=0.2.0" }
 zunel-util = { path = "crates/zunel-util", version = "=0.2.0" }
 zunel-providers = { path = "crates/zunel-providers", version = "=0.2.0" }
+zunel-tokens = { path = "crates/zunel-tokens", version = "=0.2.0" }
 zunel-core = { path = "crates/zunel-core", version = "=0.2.0" }
+
+# Token counting
+tiktoken-rs = "0.7"
 
 [profile.release]
 lto = "thin"
