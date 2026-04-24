@@ -16,8 +16,23 @@ from typing import Any
 
 import httpx
 from loguru import logger
-from oauth_cli_kit import OPENAI_CODEX_PROVIDER
-from oauth_cli_kit import get_token as get_codex_token
+
+# ``oauth-cli-kit`` is part of the optional ``[codex]`` extra; defer the
+# import error until someone actually constructs a CodexProvider.
+try:
+    from oauth_cli_kit import OPENAI_CODEX_PROVIDER
+    from oauth_cli_kit import get_token as get_codex_token
+    _OAUTH_CLI_KIT_AVAILABLE = True
+except ImportError:
+    _OAUTH_CLI_KIT_AVAILABLE = False
+    OPENAI_CODEX_PROVIDER = None  # type: ignore[assignment]
+    get_codex_token = None  # type: ignore[assignment]
+
+
+_CODEX_INSTALL_HINT = (
+    "The Codex provider requires the optional 'codex' extra. "
+    "Install with: pip install 'zunel[codex]'"
+)
 
 from zunel.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from zunel.providers.openai_responses import (
@@ -45,6 +60,8 @@ class CodexProvider(LLMProvider):
         default_model: str = DEFAULT_CODEX_MODEL,
         api_base: str | None = None,
     ) -> None:
+        if not _OAUTH_CLI_KIT_AVAILABLE:
+            raise RuntimeError(_CODEX_INSTALL_HINT)
         super().__init__(api_key=None, api_base=api_base)
         self.default_model = default_model
 

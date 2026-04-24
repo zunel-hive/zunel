@@ -36,9 +36,11 @@ def test_media_dir_supports_channel_namespace(monkeypatch, tmp_path: Path) -> No
     assert get_media_dir("telegram") == config_file.parent / "media" / "telegram"
 
 
-def test_shared_and_legacy_paths_remain_global() -> None:
-    assert get_cli_history_path() == Path.home() / ".zunel" / "history" / "cli_history"
-    assert get_legacy_sessions_dir() == Path.home() / ".zunel" / "sessions"
+def test_shared_and_legacy_paths_follow_zunel_home(monkeypatch, tmp_path: Path) -> None:
+    fake_home = tmp_path / "zunel_home"
+    monkeypatch.setenv("ZUNEL_HOME", str(fake_home))
+    assert get_cli_history_path() == fake_home / "history" / "cli_history"
+    assert get_legacy_sessions_dir() == fake_home / "sessions"
 
 
 def test_workspace_path_is_explicitly_resolved(monkeypatch, tmp_path: Path) -> None:
@@ -47,6 +49,7 @@ def test_workspace_path_is_explicitly_resolved(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr(Path, "home", lambda: fake_home)
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.delenv("ZUNEL_HOME", raising=False)
 
     assert get_workspace_path() == fake_home / ".zunel" / "workspace"
     assert get_workspace_path("~/custom-workspace") == fake_home / "custom-workspace"
@@ -60,7 +63,16 @@ def test_is_default_workspace_distinguishes_default_and_custom_paths(
     monkeypatch.setattr(Path, "home", lambda: fake_home)
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.delenv("ZUNEL_HOME", raising=False)
 
     assert is_default_workspace(None) is True
     assert is_default_workspace(fake_home / ".zunel" / "workspace") is True
     assert is_default_workspace("~/custom-workspace") is False
+
+
+def test_workspace_path_follows_zunel_home(monkeypatch, tmp_path: Path) -> None:
+    fake_home = tmp_path / "zunel_home"
+    monkeypatch.setenv("ZUNEL_HOME", str(fake_home))
+    assert get_workspace_path() == fake_home / "workspace"
+    assert is_default_workspace(None) is True
+    assert is_default_workspace(fake_home / "workspace") is True

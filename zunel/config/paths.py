@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from zunel.config.loader import get_config_path
+from zunel.config.profile import get_zunel_home
 from zunel.utils.helpers import ensure_dir
 
 
@@ -34,24 +35,33 @@ def get_logs_dir() -> Path:
     return get_runtime_subdir("logs")
 
 
+def _default_workspace_path() -> Path:
+    """Default workspace location for the current ``ZUNEL_HOME``."""
+    return get_zunel_home() / "workspace"
+
+
 def get_workspace_path(workspace: str | None = None) -> Path:
     """Resolve and ensure the agent workspace path."""
-    path = Path(workspace).expanduser() if workspace else Path.home() / ".zunel" / "workspace"
+    path = Path(workspace).expanduser() if workspace else _default_workspace_path()
     return ensure_dir(path)
 
 
 def is_default_workspace(workspace: str | Path | None) -> bool:
     """Return whether a workspace resolves to zunel's default workspace path."""
-    current = Path(workspace).expanduser() if workspace is not None else Path.home() / ".zunel" / "workspace"
-    default = Path.home() / ".zunel" / "workspace"
+    current = (
+        Path(workspace).expanduser()
+        if workspace is not None
+        else _default_workspace_path()
+    )
+    default = _default_workspace_path()
     return current.resolve(strict=False) == default.resolve(strict=False)
 
 
 def get_cli_history_path() -> Path:
     """Return the shared CLI history file path."""
-    return Path.home() / ".zunel" / "history" / "cli_history"
+    return get_zunel_home() / "history" / "cli_history"
 
 
 def get_legacy_sessions_dir() -> Path:
     """Return the legacy global session directory used for migration fallback."""
-    return Path.home() / ".zunel" / "sessions"
+    return get_zunel_home() / "sessions"

@@ -1046,6 +1046,14 @@ def channels_status(
 mcp_app = typer.Typer(help="Manage MCP servers")
 app.add_typer(mcp_app, name="mcp")
 
+from zunel.cli.plugins_cli import plugins_app  # noqa: E402
+from zunel.cli.profile_cli import profile_app  # noqa: E402
+from zunel.cli.slack_cli import slack_app  # noqa: E402
+
+app.add_typer(slack_app, name="slack")
+app.add_typer(profile_app, name="profile")
+app.add_typer(plugins_app, name="plugins")
+
 
 @mcp_app.command("login")
 def mcp_login(
@@ -1131,6 +1139,49 @@ def mcp_login(
         raise typer.Exit(code=1)
 
     _asyncio.run(_login())
+
+
+@mcp_app.command("serve")
+def mcp_serve(
+    server: str = typer.Option(
+        "self",
+        "--server",
+        "-s",
+        help=(
+            "Which built-in MCP server to run over stdio. "
+            "Currently only 'self' is supported (zunel-self)."
+        ),
+    ),
+) -> None:
+    """Run a built-in zunel MCP server over stdio.
+
+    With ``--server self`` (the default) this starts the *zunel-self* MCP
+    server which exposes the running install's sessions, channels, MCP
+    servers and cron jobs, plus a single ``send_message_to_channel`` write
+    tool. Plug it into Cursor's MCP config (or any other MCP client) by
+    pointing ``command`` at ``zunel mcp serve``.
+    """
+    normalized = server.strip().lower()
+    if normalized in {"self", "zunel-self", "zunel_self"}:
+        try:
+            from zunel.mcp.zunel_self import server as self_server
+        except ImportError as exc:
+            console.print(
+                f"[red]✗[/red] Failed to import zunel-self MCP server: {exc}"
+            )
+            raise typer.Exit(code=2) from exc
+        try:
+            self_server.main()
+        except RuntimeError as exc:
+            console.print(f"[red]✗[/red] {exc}")
+            raise typer.Exit(code=2) from exc
+        return
+
+    console.print(
+        f"[red]✗[/red] Unknown MCP server: {server!r}. "
+        "Supported values: self."
+    )
+    raise typer.Exit(code=2)
 
 
 # ============================================================================

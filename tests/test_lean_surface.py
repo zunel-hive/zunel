@@ -46,13 +46,20 @@ def test_channel_registry_ignores_external_entry_points(monkeypatch) -> None:
     assert "fake" not in discovered
 
 
-def test_cli_help_does_not_advertise_plugins_command() -> None:
+def test_cli_help_advertises_plugins_command() -> None:
+    """``zunel plugins`` is a first-class subcommand from Phase 6b onwards.
+
+    Earlier versions of zunel deliberately had no plugin concept, so the
+    lean-surface guard asserted the command was *absent*. The hermes
+    adoption plan added a small in-tree plugin system; this test now
+    pins the CLI surface so it stays discoverable.
+    """
     runner = CliRunner()
 
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    assert "plugins" not in result.stdout.lower()
+    assert "plugins" in result.stdout.lower()
 
 
 def test_entrypoint_script_uses_zunel_branding() -> None:

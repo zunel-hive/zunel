@@ -165,6 +165,7 @@ class AgentLoop:
         from zunel.config.schema import ExecToolConfig, ToolsConfig, WebToolsConfig
 
         _tc = tools_config or ToolsConfig()
+        self.tools_config = _tc
         defaults = AgentDefaults()
         self.bus = bus
         self.channels_config = channels_config
@@ -218,6 +219,13 @@ class AgentLoop:
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Plugin discovery is idempotent: ``discover_and_load`` caches its
+        # result on first call so repeated AgentLoop construction (e.g.
+        # gateway hot-reload) does not re-import plugin modules.
+        from zunel.plugins import get_plugin_manager
+        self._plugin_manager = get_plugin_manager()
+        self._plugin_manager.discover_and_load()
+        self._started_sessions: set[str] = set()
         # Per-session pending queues for mid-turn message injection.
         # When a session has an active task, new messages for that session
         # are routed here instead of creating a new task.
@@ -500,6 +508,8 @@ class AgentLoop:
             retry_wait_callback=on_retry_wait,
             checkpoint_callback=_checkpoint,
             injection_callback=_drain_pending,
+            approval_required=self.tools_config.approval_required,
+            approval_scope=self.tools_config.approval_scope,
         ))
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":
@@ -704,6 +714,9 @@ class AgentLoop:
         if self._background_tasks:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
+        # Fire on_session_end before tearing down MCP connections so
+        # plugins that need to write back via tools still have them.
+        await self._fire_session_end_all()
         for name, stack in self._mcp_stacks.items():
             try:
                 await stack.aclose()
@@ -721,6 +734,49 @@ class AgentLoop:
         """Stop the agent loop."""
         self._running = False
         logger.info("Agent loop stopping")
+
+    async def _maybe_fire_session_start(self, session_key: str) -> None:
+        """Invoke plugins' ``on_session_start`` once per session_key per process.
+
+        The agent loop touches the same session many times across a long
+        gateway lifetime; firing the hook on every message would be a
+        footgun for plugins that, e.g., open a file handle. We dedupe by
+        tracking ``self._started_sessions`` instead.
+        """
+        if session_key in self._started_sessions:
+            return
+        self._started_sessions.add(session_key)
+        try:
+            await self._plugin_manager.invoke_hook(
+                "on_session_start", session_key=session_key
+            )
+        except Exception:
+            logger.exception(
+                "Plugin manager: on_session_start dispatch failed "
+                "for session {}",
+                session_key,
+            )
+
+    async def _fire_session_end_all(self) -> None:
+        """Best-effort fire ``on_session_end`` for every started session.
+
+        Called from :meth:`close_mcp` so plugins get a chance to flush
+        state on a clean shutdown. Plugin failures are isolated by the
+        manager itself, so this never raises.
+        """
+        keys = list(self._started_sessions)
+        self._started_sessions.clear()
+        for key in keys:
+            try:
+                await self._plugin_manager.invoke_hook(
+                    "on_session_end", session_key=key
+                )
+            except Exception:
+                logger.exception(
+                    "Plugin manager: on_session_end dispatch failed "
+                    "for session {}",
+                    key,
+                )
 
     async def _process_message(
         self,
@@ -740,6 +796,7 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
+            await self._maybe_fire_session_start(key)
             if self._restore_runtime_checkpoint(session):
                 self.sessions.save(session)
             if self._restore_pending_user_turn(session):
@@ -800,6 +857,7 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+        await self._maybe_fire_session_start(key)
         if self._restore_runtime_checkpoint(session):
             self.sessions.save(session)
         if self._restore_pending_user_turn(session):

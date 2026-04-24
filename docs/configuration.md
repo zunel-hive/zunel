@@ -28,6 +28,27 @@ Edit `config.json` directly for persistent settings. The current loader also
 resolves `${VAR}` placeholders inside `config.json`, but it does not use nested
 `ZUNEL__...` variables as general live overrides for an existing config file.
 
+### Profiles and `ZUNEL_HOME`
+
+Every path zunel reads or writes — `config.json`, the workspace, sessions,
+Slack OAuth tokens, MCP OAuth tokens, the file cache — lives under a single
+home directory. By default that is `~/.zunel/`, but you can switch it
+per-invocation or persistently:
+
+- **Per-command override:** `ZUNEL_HOME=/path/to/dir zunel ...` (an absolute
+  path; takes priority over everything else).
+- **Profile flag:** `zunel --profile dev ...` (or `-p dev`) maps to
+  `~/.zunel-dev/`. The reserved name `default` maps to `~/.zunel/`. Names
+  containing whitespace, path separators, or `..` are rejected.
+- **Sticky default:** `zunel profile use dev` writes `dev` to
+  `~/.zunel/active_profile` so subsequent `zunel` invocations behave as if
+  you had passed `--profile dev`. Switch back with `zunel profile use
+  default`.
+
+Use profiles to run separate dev / prod / experiment instances side by
+side without their configs, sessions, or OAuth tokens colliding. See
+`docs/cli-reference.md#profiles` for the full command list.
+
 ## A Minimal Working Config
 
 ```json
@@ -383,6 +404,42 @@ Important exec settings:
 }
 ```
 
+### Human-in-the-loop approval gate
+
+Sensitive tools can be gated behind a human approval prompt. The gate is
+**off by default** for backward compatibility — opt in via:
+
+```json
+{
+  "tools": {
+    "approvalRequired": true,
+    "approvalScope": "shell"
+  }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `approvalRequired` | Master switch. When `true`, gated tools must be approved before they run |
+| `approvalScope` | Which tools the gate applies to: `"shell"` (just `exec`, default), `"writes"` (file mutations: `write_file`, `edit_file`, `notebook_edit`), or `"all"` (both) |
+
+When the gate fires, zunel asks the user via:
+
+- The active channel gateway if one is registered (Slack channel posts a
+  Block Kit message with **Once / Session / Always / Deny** buttons).
+- An interactive stdin prompt when running `zunel agent` in a terminal.
+
+Approval decisions:
+
+- **Once** — allow this single call.
+- **Session** — allow identical commands for the rest of this process.
+- **Always** — persist the decision to `<ZUNEL_HOME>/approvals.json`
+  (survives restarts; remove the file to revoke).
+- **Deny** — refuse the call; the agent gets an error string back and
+  decides what to do next.
+
+Approval timeouts default to 5 minutes and resolve to **Deny**.
+
 ### MCP servers
 
 Add MCP servers under `tools.mcpServers`:
@@ -481,6 +538,227 @@ Additional per-server knobs:
 `headers` is ignored when `oauth` is true — tokens are injected automatically.
 
 > **Glean tip:** Glean's hosted MCP is **streamable-HTTP**. Using `type: "sse"` opens a stream that never sends an `endpoint` event, causing `initialize` to hang until the init timeout trips. Configure it as `type: "streamableHttp"`.
+
+### Slack user MCP (read as you)
+
+zunel ships a local, read-only Slack MCP server that authenticates as **you**
+(a user token, `xoxp-…`) rather than as the `@zunel` bot. The bot channel
+can only see DMs sent to it; the user MCP lets the agent search and read any
+channel, DM, or thread **you** can see in Slack.
+
+This is deliberately separate from the `channels.slack` bot integration. In
+fact, on Enterprise Grid workspaces it usually has to be a **separate Slack
+app** — the org Permissions Policy gates the user-token (MCP) install path
+on the manifest being "bot-light" (`is_mcp_enabled: true`,
+`token_rotation_enabled: true`, no socket mode, no event subscriptions, no
+interactivity, minimal bot scopes). The DM-bot app at
+`~/.zunel/slack-app/` carries those bot signals on purpose, so it can't
+also vend user tokens. Set up a second app at `~/.zunel/slack-app-mcp/`:
+
+1. **Create the MCP vendor app and request approval** (one-time).
+
+   The manifest at `~/.zunel/slack-app-mcp/manifest.json` should look like:
+
+   ```json
+   {
+     "display_information": { "name": "zunel-mcp" },
+     "features": { "bot_user": { "display_name": "zunel-mcp" } },
+     "oauth_config": {
+       "redirect_urls": ["https://slack.com/robots.txt"],
+       "scopes": {
+         "bot": ["assistant:write"],
+         "user": [
+           "channels:history", "groups:history",
+           "im:history",       "mpim:history",
+           "search:read.im",   "search:read.mpim",
+           "search:read.private", "search:read.public",
+           "search:read.users",   "search:read.files",
+           "users:read",       "users:read.email"
+         ],
+         "user_optional": ["search:read.files"]
+       }
+     },
+     "settings": {
+       "org_deploy_enabled": true,
+       "socket_mode_enabled": false,
+       "token_rotation_enabled": true,
+       "is_mcp_enabled": true
+     }
+   }
+   ```
+
+   Create via `apps.manifest.create` (returns an `app_id` and credentials),
+   save `client_id` / `client_secret` to
+   `~/.zunel/slack-app-mcp/app_info.json`, then submit
+   `apps.approvals.requests.create` with a reason like "Read-only personal
+   assistant user token (MCP vendor app)." Wait for admin approval.
+
+   Why granular `search:read.*` instead of `search:read`? On Grid, the
+   coarse `search:read` is typically blocked by the Permissions Policy
+   while the granular variants are allowed.
+
+2. **Mint the user token:**
+
+   ```bash
+   zunel slack login
+   ```
+
+   Opens a browser, runs Slack OAuth v2 with `user_scope=`, and writes
+   `~/.zunel/slack-app-mcp/user_token.json` (0600). The flow is paste-back:
+   after approving in Slack, copy the `https://slack.com/robots.txt?...`
+   URL from the address bar and paste it back into the CLI. Use
+   `zunel slack whoami` to inspect the cached identity (and rotation
+   status), `zunel slack refresh` to force a token rotation, and
+   `zunel slack logout` to delete it.
+
+3. **Wire the MCP server into the agent:**
+
+   ```json
+   {
+     "tools": {
+       "mcpServers": {
+         "slack_me": {
+           "type": "stdio",
+           "command": "/absolute/path/to/python",
+           "args": ["-m", "zunel.mcp.slack"],
+           "initTimeout": 15,
+           "toolTimeout": 30
+         }
+       }
+     }
+   }
+   ```
+
+   Use the absolute path to the interpreter that has `zunel` installed (for
+   example the gateway's venv python). Restart `zunel gateway` and the tools
+   show up as `mcp_slack_me_whoami`, `mcp_slack_me_search_messages`, etc.
+
+**Read-only by construction.** The server intentionally registers **no**
+write tools (no `chat.postMessage`, no reactions, no DM open). Adding one
+must be an explicit, separately reviewed change.
+
+**Audit attribution warning.** Every call the agent makes through this MCP
+is attributed to **your** user ID in Slack's audit log. A random teammate
+grepping audit logs will see activity that looks like you typing. Do not
+enable this on a workspace that is uncomfortable with that attribution.
+
+**Prompt-injection surface.** The agent now ingests any message in any
+channel you can read. Hostile content in a noisy channel becomes input to
+the agent; because nothing here can post, the worst case is the agent
+saying something wrong **to you**, not to anyone else.
+
+### Built-in MCP server: `zunel mcp serve` (zunel-self)
+
+`zunel mcp serve` runs the **zunel-self** MCP server over stdio. It lets
+external MCP clients (Cursor, other agents) inspect the running zunel
+install — its sessions, channels, MCP servers, and cron jobs — and post
+a message back to the user via the configured Slack bot.
+
+The server reads everything from disk, so it stays consistent with the
+active `ZUNEL_HOME` / `--profile` and works whether or not a `zunel
+gateway` process is also running.
+
+Tools exposed:
+
+| Tool | Description |
+|------|-------------|
+| `zunel_sessions_list` | Newest-first list of session keys, timestamps. Supports `limit` and `search`. |
+| `zunel_session_get` | Metadata + message count for a single session. |
+| `zunel_session_messages` | Trailing N messages of a session. |
+| `zunel_channels_list` | Built-in channels with `enabled` state (no tokens). |
+| `zunel_mcp_servers_list` | Configured `tools.mcpServers` (no tokens). |
+| `zunel_cron_jobs_list` | Cron jobs from disk; `include_disabled` toggles paused jobs. |
+| `zunel_cron_job_get` | Single cron job by id. |
+| `zunel_send_message_to_channel` | Post text to Slack via the configured bot token; requires `channel="slack"` and a Slack channel/DM id. Optional `thread_ts`. |
+
+Wire into a Cursor / Claude Desktop MCP config like any other stdio
+server:
+
+```json
+{
+  "mcpServers": {
+    "zunel-self": {
+      "command": "zunel",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+Read-only by construction except for `zunel_send_message_to_channel`,
+which is a single, deliberately narrow Slack write surface. Adding more
+write tools must be an explicit, separately reviewed change.
+
+## Plugins
+
+zunel discovers plugins from `<ZUNEL_HOME>/plugins/<name>/` on agent
+startup. A plugin is a small directory containing two files:
+
+| File | Purpose |
+|------|---------|
+| `plugin.yaml` | Manifest describing the plugin (name, version, declared hooks). |
+| `plugin.py` (or `__init__.py`) | Python module exposing the hook callables. |
+
+Plugin discovery is a no-op when the plugins directory does not exist,
+so this is purely opt-in — drop a folder in to enable, delete the folder
+to disable. There is no registration step.
+
+Inspect what the running install sees:
+
+```
+zunel plugins list           # cached discovery (fast)
+zunel plugins list --force   # re-import every plugin module
+```
+
+### Manifest schema (`plugin.yaml`)
+
+```yaml
+name: heartbeat_logger        # required: unique identifier
+version: 0.1.0                # required: semver-style string
+description: "Logs lifecycle events to stderr"
+author: "you@example.com"
+pip_dependencies: []          # optional: declared for documentation only
+hooks:                        # optional: each entry must match a callable
+  - on_session_start
+  - pre_tool_call
+  - post_tool_call
+  - on_session_end
+provides_memory: false
+provides_tools: []
+```
+
+A reference implementation ships in
+`zunel/plugins/builtins/heartbeat_logger/` — copy it to
+`<ZUNEL_HOME>/plugins/my_plugin/` to bootstrap a new plugin.
+
+### Lifecycle hooks
+
+Hook callables receive **only keyword arguments** and may be sync or
+`async`. Failures in any single hook are caught and logged with the
+plugin name; one buggy plugin cannot crash the agent loop or block the
+other plugins.
+
+| Hook | When it fires | Kwargs |
+|------|---------------|--------|
+| `on_session_start` | First time the agent loop sees a `session_key` in this process. Deduped per-session — does **not** fire on every message. | `session_key: str` |
+| `pre_tool_call` | Immediately before every tool execution in `AgentRunner._run_tool`, after the approval gate has cleared. | `tool_name: str`, `params: dict`, `session_key: str \| None` |
+| `post_tool_call` | After every tool execution, on both success and failure paths (including tools that return `"Error: ..."` strings). | `tool_name: str`, `params: dict`, `session_key: str \| None`, `status: "ok" \| "error"`, plus `result` (on ok) or `error: str` (on error) |
+| `on_session_end` | During `AgentLoop.close_mcp` for every session that ever started in this process. Best-effort; not guaranteed on hard kills. | `session_key: str` |
+
+### Notes and constraints
+
+- Plugin modules are imported under `zunel_plugin_<name>`, sandboxed
+  away from the rest of the codebase's namespace. Two plugins with the
+  same `name:` will collide — keep names unique.
+- `pip_dependencies` is documentation only today. Install third-party
+  packages yourself (e.g. `pip install --user ...`) before enabling the
+  plugin.
+- Discovery is cached for the lifetime of the process. To pick up
+  changes without restarting an interactive `zunel agent`, run
+  `zunel plugins list --force` in a separate shell or restart the
+  agent.
+- Plugins do not have a tool-registration surface yet. `provides_tools`
+  is reserved for a future iteration.
 
 ## Security
 

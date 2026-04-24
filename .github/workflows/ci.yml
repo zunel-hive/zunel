@@ -37,3 +37,26 @@ jobs:
 
     - name: Run tests
       run: uv run pytest tests/
+
+  no-extras-import:
+    name: Import zunel with no optional extras
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - uses: astral-sh/setup-uv@v4
+    - name: Install core only
+      run: uv sync --no-dev
+    - name: Confirm zunel imports without optional extras
+      run: |
+        uv run python -c "
+        import zunel
+        from zunel.cli.commands import app
+        from zunel.channels.slack import _SLACK_AVAILABLE
+        from zunel.mcp.slack.server import _MCP_AVAILABLE
+        assert _SLACK_AVAILABLE is False, 'slack should be missing without [slack]'
+        assert _MCP_AVAILABLE is False, 'mcp should be missing without [mcp]'
+        print('OK: zunel imports cleanly without optional extras')
+        "

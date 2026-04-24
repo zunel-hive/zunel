@@ -1,0 +1,13 @@
+name: heartbeat_logger
+version: 0.1.0
+description: >
+  Reference example plugin that logs to stderr on every session lifecycle
+  event. Useful as a copy-paste template when writing your own plugin.
+author: zunel
+hooks:
+  - on_session_start
+  - pre_tool_call
+  - post_tool_call
+  - on_session_end
+provides_memory: false
+provides_tools: []

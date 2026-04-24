@@ -195,6 +195,15 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
 
+    # Human-in-the-loop approval gate. Off by default for backward compat.
+    # When ``approval_required = true``, sensitive tools (governed by
+    # ``approval_scope``) call into ``zunel.agent.approval.request_approval``
+    # before executing. The Slack channel surfaces these prompts as Block
+    # Kit messages with Once / Session / Always / Deny buttons; the local
+    # ``zunel agent`` REPL falls back to a stdin prompt.
+    approval_required: bool = False
+    approval_scope: Literal["all", "shell", "writes"] = "shell"
+
 
 class Config(BaseSettings):
     """Root configuration for zunel."""

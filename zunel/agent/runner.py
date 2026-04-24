@@ -74,6 +74,12 @@ class AgentRunSpec:
     retry_wait_callback: Any | None = None
     checkpoint_callback: Any | None = None
     injection_callback: Any | None = None
+    # Human-in-the-loop approval gate. When ``approval_required`` is on,
+    # any tool whose name matches ``approval_scope`` (resolved via
+    # :func:`zunel.agent.approval.tool_requires_approval`) must clear
+    # ``request_approval`` before its ``execute`` runs.
+    approval_required: bool = False
+    approval_scope: str = "shell"
 
 
 @dataclass(slots=True)
@@ -684,6 +690,50 @@ class AgentRunner:
                 "detail": prep_error.split(": ", 1)[-1][:120],
             }
             return prep_error + _HINT, event, RuntimeError(prep_error) if spec.fail_on_tool_error else None
+
+        if spec.approval_required:
+            from zunel.agent.approval import (
+                request_approval,
+                summarize_tool_call,
+                tool_requires_approval,
+            )
+            if tool_requires_approval(tool_call.name, spec.approval_scope):
+                summary = summarize_tool_call(tool_call.name, params)
+                decision = await request_approval(
+                    spec.session_key or "default",
+                    summary,
+                    scope=spec.approval_scope,
+                )
+                if not decision.is_grant:
+                    denied = (
+                        f"Error: tool call '{tool_call.name}' was denied by the "
+                        "approval gate (user said 'deny' or the request timed "
+                        "out)."
+                    )
+                    event = {
+                        "name": tool_call.name,
+                        "status": "denied",
+                        "detail": "approval denied",
+                    }
+                    return denied + _HINT, event, None
+
+        # Plugin pre_tool_call hook (failures isolated by the manager).
+        from zunel.plugins import get_plugin_manager
+        plugin_manager = get_plugin_manager()
+        try:
+            await plugin_manager.invoke_hook(
+                "pre_tool_call",
+                tool_name=tool_call.name,
+                params=params,
+                session_key=spec.session_key,
+            )
+        except Exception:
+            logger.exception(
+                "Plugin manager: pre_tool_call dispatch failed "
+                "for tool {}",
+                tool_call.name,
+            )
+
         try:
             if tool is not None:
                 result = await tool.execute(**params)
@@ -697,6 +747,21 @@ class AgentRunner:
                 "status": "error",
                 "detail": str(exc),
             }
+            try:
+                await plugin_manager.invoke_hook(
+                    "post_tool_call",
+                    tool_name=tool_call.name,
+                    params=params,
+                    session_key=spec.session_key,
+                    status="error",
+                    error=str(exc),
+                )
+            except Exception:
+                logger.exception(
+                    "Plugin manager: post_tool_call dispatch failed "
+                    "for tool {}",
+                    tool_call.name,
+                )
             if spec.fail_on_tool_error:
                 return f"Error: {type(exc).__name__}: {exc}", event, exc
             return f"Error: {type(exc).__name__}: {exc}", event, None
@@ -707,6 +772,21 @@ class AgentRunner:
                 "status": "error",
                 "detail": result.replace("\n", " ").strip()[:120],
             }
+            try:
+                await plugin_manager.invoke_hook(
+                    "post_tool_call",
+                    tool_name=tool_call.name,
+                    params=params,
+                    session_key=spec.session_key,
+                    status="error",
+                    error=result,
+                )
+            except Exception:
+                logger.exception(
+                    "Plugin manager: post_tool_call dispatch failed "
+                    "for tool {}",
+                    tool_call.name,
+                )
             if spec.fail_on_tool_error:
                 return result + _HINT, event, RuntimeError(result)
             return result + _HINT, event, None
@@ -717,6 +797,21 @@ class AgentRunner:
             detail = "(empty)"
         elif len(detail) > 120:
             detail = detail[:120] + "..."
+        try:
+            await plugin_manager.invoke_hook(
+                "post_tool_call",
+                tool_name=tool_call.name,
+                params=params,
+                session_key=spec.session_key,
+                status="ok",
+                result=result,
+            )
+        except Exception:
+            logger.exception(
+                "Plugin manager: post_tool_call dispatch failed "
+                "for tool {}",
+                tool_call.name,
+            )
         return result, {"name": tool_call.name, "status": "ok", "detail": detail}, None
 
     async def _emit_checkpoint(

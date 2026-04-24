@@ -17,10 +17,30 @@ import urllib.parse
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from loguru import logger
-from mcp.client.auth import OAuthClientProvider, TokenStorage
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+
+# MCP is an optional extra; users who never use OAuth-enabled MCP servers
+# don't need to install it. Defer the import error to ``make_oauth_provider``.
+try:
+    from mcp.client.auth import OAuthClientProvider, TokenStorage
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+    _MCP_AVAILABLE = True
+except ImportError:
+    _MCP_AVAILABLE = False
+    if not TYPE_CHECKING:
+        OAuthClientProvider = None  # type: ignore[assignment,misc]
+        TokenStorage = object  # type: ignore[assignment,misc]
+        OAuthClientInformationFull = None  # type: ignore[assignment,misc]
+        OAuthClientMetadata = None  # type: ignore[assignment,misc]
+        OAuthToken = None  # type: ignore[assignment,misc]
+
+
+_MCP_INSTALL_HINT = (
+    "MCP OAuth support requires the optional 'mcp' extra. "
+    "Install with: pip install 'zunel[mcp]'"
+)
 
 DEFAULT_CALLBACK_HOST = "127.0.0.1"
 DEFAULT_CALLBACK_PORT = 33418  # arbitrary ephemeral-range port used for the OAuth redirect
@@ -209,7 +229,7 @@ def _port_is_free(host: str, port: int) -> bool:
         return True
 
 
-def make_oauth_provider(server_url: str, settings: OAuthSettings) -> OAuthClientProvider:
+def make_oauth_provider(server_url: str, settings: OAuthSettings) -> "OAuthClientProvider":
     """Build an :class:`OAuthClientProvider` backed by :class:`FileTokenStorage`.
 
     When ``settings.client_id`` is provided, Dynamic Client Registration is skipped
@@ -217,6 +237,8 @@ def make_oauth_provider(server_url: str, settings: OAuthSettings) -> OAuthClient
     the provider reads it. This is required for servers like Slack's hosted MCP
     (``https://mcp.slack.com/mcp``) that do not expose a ``registration_endpoint``.
     """
+    if not _MCP_AVAILABLE:
+        raise RuntimeError(_MCP_INSTALL_HINT)
 
     storage = FileTokenStorage(settings.server_name, settings.storage_dir)
 

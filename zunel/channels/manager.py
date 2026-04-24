@@ -65,6 +65,14 @@ class ChannelManager:
                 channel = cls(section, self.bus)
                 self.channels[name] = channel
                 logger.info("{} channel enabled", cls.display_name)
+            except RuntimeError as e:
+                # Optional-extra not installed (e.g. zunel[slack] missing).
+                # Surface a clear, actionable message rather than a stack trace.
+                logger.warning(
+                    "{} channel is enabled in config but cannot be started: {}",
+                    cls.display_name,
+                    e,
+                )
             except Exception as e:
                 logger.warning("{} channel not available: {}", name, e)
 

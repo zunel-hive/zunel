@@ -10,6 +10,7 @@ import pydantic
 from loguru import logger
 from pydantic import BaseModel
 
+from zunel.config.profile import get_zunel_home
 from zunel.config.schema import Config
 
 # Global variable to store current config path (for multi-instance support)
@@ -28,10 +29,15 @@ def get_active_config_path() -> Path | None:
 
 
 def get_config_path() -> Path:
-    """Get the configuration file path."""
+    """Get the configuration file path.
+
+    Honors any explicit override set via :func:`set_config_path` first,
+    then falls back to ``<ZUNEL_HOME>/config.json`` (resolves the active
+    profile via :func:`zunel.config.profile.get_zunel_home`).
+    """
     if _current_config_path:
         return _current_config_path
-    return Path.home() / ".zunel" / "config.json"
+    return get_zunel_home() / "config.json"
 
 
 def load_config(config_path: Path | None = None) -> Config:
