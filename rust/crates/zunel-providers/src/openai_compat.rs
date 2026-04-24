@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 
 use crate::base::{
     ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, ToolSchema, Usage,
@@ -58,32 +60,70 @@ impl LLMProvider for OpenAICompatProvider {
         _tools: &[ToolSchema],
         settings: &GenerationSettings,
     ) -> Result<LLMResponse> {
+        const MAX_ATTEMPTS: u32 = 2;
+        const MAX_WAIT: Duration = Duration::from_secs(5);
+
         let body = RequestBody::new(model, messages, settings);
         let url = format!("{}/chat/completions", self.api_base);
-        let response = self.client.post(&url).json(&body).send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+
+        let mut last_retry_after: Option<Duration> = None;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let response = self.client.post(&url).json(&body).send().await?;
+            let status = response.status();
+
+            if status.is_success() {
+                let parsed: ResponseBody = response
+                    .json()
+                    .await
+                    .map_err(|e| Error::Parse(format!("json decode: {e}")))?;
+                let choice = parsed
+                    .choices
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::Parse("response had no choices".into()))?;
+                return Ok(LLMResponse {
+                    content: choice.message.content,
+                    tool_calls: Vec::new(),
+                    usage: parsed.usage.unwrap_or_default().into(),
+                });
+            }
+
+            if status.as_u16() == 429 && attempt < MAX_ATTEMPTS {
+                let retry = parse_retry_after(response.headers())
+                    .unwrap_or(Duration::from_millis(500))
+                    .min(MAX_WAIT);
+                last_retry_after = Some(retry);
+                tracing::warn!(
+                    attempt = attempt,
+                    retry_after_ms = retry.as_millis() as u64,
+                    "openai-compat: 429, retrying"
+                );
+                sleep(retry).await;
+                continue;
+            }
+
+            if status.as_u16() == 429 {
+                return Err(Error::RateLimited {
+                    retry_after: last_retry_after,
+                });
+            }
+
+            let text = response.text().await.unwrap_or_default();
             return Err(Error::ProviderReturned {
                 status: status.as_u16(),
-                body,
+                body: text,
             });
         }
-        let parsed: ResponseBody = response
-            .json()
-            .await
-            .map_err(|e| Error::Parse(format!("json decode: {e}")))?;
-        let choice = parsed
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::Parse("response had no choices".into()))?;
-        Ok(LLMResponse {
-            content: choice.message.content,
-            tool_calls: Vec::new(),
-            usage: parsed.usage.unwrap_or_default().into(),
-        })
+        unreachable!("loop always returns")
     }
+}
+
+fn parse_retry_after(headers: &header::HeaderMap) -> Option<Duration> {
+    let v = headers.get(header::RETRY_AFTER)?.to_str().ok()?;
+    if let Ok(seconds) = v.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    None
 }
 
 #[derive(Serialize)]

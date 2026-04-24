@@ -154,3 +154,69 @@ async fn request_body_matches_snapshot() {
     let body = captured.lock().unwrap().take().expect("request captured");
     insta::assert_json_snapshot!("openai_compat_request_body", body);
 }
+
+#[tokio::test]
+async fn retries_once_on_429_then_succeeds() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "0")
+                .set_body_string("slow down"),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(canned_response_body()))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAICompatProvider::new("sk".into(), server.uri(), BTreeMap::new()).unwrap();
+    let response = provider
+        .generate(
+            "gpt-x",
+            &[ChatMessage::user("hi")],
+            &[],
+            &GenerationSettings::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.content.as_deref(), Some("hello from wiremock"));
+}
+
+#[tokio::test]
+async fn gives_up_after_one_retry() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "0")
+                .set_body_string("still slow"),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = OpenAICompatProvider::new("sk".into(), server.uri(), BTreeMap::new()).unwrap();
+    let err = provider
+        .generate(
+            "gpt-x",
+            &[ChatMessage::user("hi")],
+            &[],
+            &GenerationSettings::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, zunel_providers::Error::RateLimited { .. }));
+}
