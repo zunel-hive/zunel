@@ -49,3 +49,20 @@ Update this file at the end of every slice.
 - hyperfine: 1.20.0
 - hyperfine reported statistical outliers on the Rust run; the absolute
   spread is still < 50 ms, well inside the Python mean.
+
+## Slice 1 Exit
+
+- Commit range: `b8f1aaa..cb88770` (plus this docs commit)
+- Test count: 26 (2 schema + 2 paths + 4 loader + 2 util + 2 bus + 4 openai_compat
+  non-streaming + 2 openai_compat retry + 3 build + 2 core + 1 cli integration
+  + 1 facade + 1 facade doctest)
+- Release build: clean on `cargo build --release --workspace`
+- Clippy: clean with `-D warnings` on `--all-targets`
+- Rustfmt: clean on `cargo fmt --check`
+- cargo-deny: advisories + bans + licenses + sources all ok
+- Static binary: **3.1 MiB** (macOS arm64, stripped)
+- Startup speed: **6.75× faster** than Python zunel (55.7 ms vs 376.3 ms)
+- Peak RSS: **21× smaller** than Python zunel (2.66 MiB vs 56.6 MiB)
+- Local tag: `rust-slice-1` (not pushed; local-only until user authorizes)
+- Next: slice 2 spec (interactive REPL + streaming + slash commands).
+
