@@ -4,9 +4,7 @@ use zunel_core::{CommandContext, CommandOutcome, CommandRouter};
 fn exact_match_dispatches() {
     let mut router = CommandRouter::new();
     router.register_exact("/help", |_ctx| {
-        Box::pin(async move {
-            Ok(CommandOutcome::Reply("Available commands: /help".into()))
-        })
+        Box::pin(async move { Ok(CommandOutcome::Reply("Available commands: /help".into())) })
     });
 
     let ctx = CommandContext {
@@ -38,7 +36,7 @@ fn unknown_command_returns_none() {
         .enable_all()
         .build()
         .unwrap();
-    assert!(matches!(rt.block_on(router.dispatch(&ctx)).unwrap(), None));
+    assert!(rt.block_on(router.dispatch(&ctx)).unwrap().is_none());
 }
 
 #[test]

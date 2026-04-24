@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
 use crate::base::{
-    ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, StreamEvent, ToolSchema,
-    Usage,
+    ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, StreamEvent, ToolSchema, Usage,
 };
 use crate::error::{Error, Result};
 use crate::sse::SseBuffer;
@@ -163,7 +162,9 @@ impl<'a> StreamRequestBody<'a> {
             model: inner.model,
             messages: inner.messages,
             stream: true,
-            stream_options: StreamOptions { include_usage: true },
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
             temperature: inner.temperature,
             max_tokens: inner.max_tokens,
         }
@@ -182,7 +183,10 @@ struct StreamChunk {
 struct StreamChoice {
     #[serde(default)]
     delta: StreamDelta,
+    // Deserialized off the wire for forward-compat with stop-reason routing
+    // (tool_calls, length, content_filter) in a later slice. Not consumed yet.
     #[serde(default)]
+    #[allow(dead_code)]
     finish_reason: Option<String>,
 }
 

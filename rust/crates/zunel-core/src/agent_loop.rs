@@ -4,9 +4,7 @@ use futures::StreamExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use zunel_config::AgentDefaults;
-use zunel_providers::{
-    ChatMessage, GenerationSettings, LLMProvider, Role, StreamEvent,
-};
+use zunel_providers::{ChatMessage, GenerationSettings, LLMProvider, Role, StreamEvent};
 
 use crate::error::Result;
 use crate::session::{ChatRole, Session, SessionManager};
@@ -37,7 +35,11 @@ pub struct AgentLoop {
 impl AgentLoop {
     /// Slice 1 constructor — stateless, no session persistence.
     pub fn new(provider: Arc<dyn LLMProvider>, defaults: AgentDefaults) -> Self {
-        Self { provider, defaults, sessions: None }
+        Self {
+            provider,
+            defaults,
+            sessions: None,
+        }
     }
 
     /// Slice 2 constructor — sessions persist to `<workspace>/sessions/`.
@@ -108,9 +110,9 @@ impl AgentLoop {
             "agent_loop: streaming",
         );
 
-        let mut stream = self
-            .provider
-            .generate_stream(&self.defaults.model, &chat_messages, &[], &settings);
+        let mut stream =
+            self.provider
+                .generate_stream(&self.defaults.model, &chat_messages, &[], &settings);
 
         let mut accumulated = String::new();
         let mut final_content: Option<String> = None;
@@ -120,9 +122,8 @@ impl AgentLoop {
             match &event {
                 StreamEvent::ContentDelta(delta) => accumulated.push_str(delta),
                 StreamEvent::Done(resp) => {
-                    final_content = Some(
-                        resp.content.clone().unwrap_or_else(|| accumulated.clone()),
-                    );
+                    final_content =
+                        Some(resp.content.clone().unwrap_or_else(|| accumulated.clone()));
                 }
             }
             // Best-effort: if the sink is dropped, keep consuming the

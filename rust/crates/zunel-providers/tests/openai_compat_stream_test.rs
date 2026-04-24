@@ -27,7 +27,10 @@ fn sse_body(chunks: &[(&str, Option<u32>, Option<u32>)]) -> String {
                 "prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c
             });
         }
-        out.push_str(&format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap()));
+        out.push_str(&format!(
+            "data: {}\n\n",
+            serde_json::to_string(&chunk).unwrap()
+        ));
     }
     out.push_str("data: [DONE]\n\n");
     out
@@ -50,12 +53,8 @@ async fn streams_deltas_then_done() {
         .mount(&server)
         .await;
 
-    let provider = OpenAICompatProvider::new(
-        "sk-test".into(),
-        server.uri(),
-        BTreeMap::new(),
-    )
-    .unwrap();
+    let provider =
+        OpenAICompatProvider::new("sk-test".into(), server.uri(), BTreeMap::new()).unwrap();
 
     let messages = [ChatMessage::user("hi")];
     let tools = [];
@@ -104,7 +103,9 @@ async fn request_body_asks_for_stream_and_usage() {
     }
 
     let captured = Arc::new(Mutex::new(None));
-    let responder = Capture { out: captured.clone() };
+    let responder = Capture {
+        out: captured.clone(),
+    };
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -112,12 +113,7 @@ async fn request_body_asks_for_stream_and_usage() {
         .mount(&server)
         .await;
 
-    let provider = OpenAICompatProvider::new(
-        "sk".into(),
-        server.uri(),
-        BTreeMap::new(),
-    )
-    .unwrap();
+    let provider = OpenAICompatProvider::new("sk".into(), server.uri(), BTreeMap::new()).unwrap();
 
     let messages = [ChatMessage::user("hi")];
     let tools = [];
@@ -128,7 +124,10 @@ async fn request_body_asks_for_stream_and_usage() {
 
     let body = captured.lock().unwrap().take().expect("captured");
     assert_eq!(body["stream"], serde_json::json!(true));
-    assert_eq!(body["stream_options"]["include_usage"], serde_json::json!(true));
+    assert_eq!(
+        body["stream_options"]["include_usage"],
+        serde_json::json!(true)
+    );
 }
 
 #[tokio::test]
@@ -140,12 +139,7 @@ async fn non_streaming_error_still_emits_error_event() {
         .mount(&server)
         .await;
 
-    let provider = OpenAICompatProvider::new(
-        "sk".into(),
-        server.uri(),
-        BTreeMap::new(),
-    )
-    .unwrap();
+    let provider = OpenAICompatProvider::new("sk".into(), server.uri(), BTreeMap::new()).unwrap();
 
     let messages = [ChatMessage::user("hi")];
     let tools = [];

@@ -46,7 +46,8 @@ impl CommandRouter {
         F: Fn(CommandContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<CommandOutcome>> + Send + 'static,
     {
-        self.exact.push((cmd.to_string(), Box::new(move |ctx| Box::pin(handler(ctx)))));
+        self.exact
+            .push((cmd.to_string(), Box::new(move |ctx| Box::pin(handler(ctx)))));
     }
 
     pub fn register_prefix<F, Fut>(&mut self, prefix: &str, handler: F)
@@ -75,7 +76,10 @@ impl CommandRouter {
             }
         }
         for (prefix, handler) in &self.prefix {
-            if raw.to_ascii_lowercase().starts_with(&prefix.to_ascii_lowercase()) {
+            if raw
+                .to_ascii_lowercase()
+                .starts_with(&prefix.to_ascii_lowercase())
+            {
                 let args = raw[prefix.len()..].to_string();
                 let c = CommandContext {
                     session_key: ctx.session_key.clone(),

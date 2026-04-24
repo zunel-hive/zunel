@@ -20,10 +20,7 @@ fn splits_across_chunks() {
 fn multiple_events_in_one_chunk() {
     let mut buf = SseBuffer::new();
     let events = buf.feed(b"data: a\n\ndata: b\n\n");
-    assert_eq!(
-        events,
-        vec![Some("a".to_string()), Some("b".to_string())]
-    );
+    assert_eq!(events, vec![Some("a".to_string()), Some("b".to_string())]);
 }
 
 #[test]

@@ -34,7 +34,10 @@ impl LLMProvider for StreamingFake {
         _tools: &'a [ToolSchema],
         _settings: &'a GenerationSettings,
     ) -> BoxStream<'a, zunel_providers::Result<StreamEvent>> {
-        self.captured_messages.lock().unwrap().push(messages.to_vec());
+        self.captured_messages
+            .lock()
+            .unwrap()
+            .push(messages.to_vec());
         let chunks = self.chunks.clone();
         Box::pin(async_stream::stream! {
             let mut full = String::new();
@@ -110,10 +113,16 @@ async fn process_streamed_feeds_history_to_provider() {
 
     // First turn seeds history.
     let (tx1, _rx1) = mpsc::channel::<StreamEvent>(16);
-    loop_.process_streamed("cli:direct", "ping", tx1).await.unwrap();
+    loop_
+        .process_streamed("cli:direct", "ping", tx1)
+        .await
+        .unwrap();
 
     let (tx2, _rx2) = mpsc::channel::<StreamEvent>(16);
-    loop_.process_streamed("cli:direct", "again", tx2).await.unwrap();
+    loop_
+        .process_streamed("cli:direct", "again", tx2)
+        .await
+        .unwrap();
 
     let calls = captured.lock().unwrap();
     // Second call should see prior user + assistant + new user message.

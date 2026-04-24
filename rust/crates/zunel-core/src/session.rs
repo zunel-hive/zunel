@@ -3,7 +3,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local, NaiveDateTime};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Canonical chat role string mapping used across sessions.
@@ -364,10 +363,8 @@ mod tests {
 
     #[test]
     fn iso_format_matches_python_shape() {
-        let ts: DateTime<Local> = chrono::TimeZone::with_ymd_and_hms(
-            &Local, 2026, 4, 24, 10, 58, 27,
-        )
-        .unwrap();
+        let ts: DateTime<Local> =
+            chrono::TimeZone::with_ymd_and_hms(&Local, 2026, 4, 24, 10, 58, 27).unwrap();
         let iso = naive_local_iso(ts);
         // Microsecond precision, no tz suffix.
         assert_eq!(iso, "2026-04-24T10:58:27.000000");

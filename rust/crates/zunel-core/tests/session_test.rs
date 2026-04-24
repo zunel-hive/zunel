@@ -20,7 +20,10 @@ fn add_message_appends_and_updates_timestamp() {
     let entry = &session.messages()[0];
     assert_eq!(entry["role"].as_str(), Some("user"));
     assert_eq!(entry["content"].as_str(), Some("hello"));
-    assert!(entry["timestamp"].is_string(), "timestamp present, got {entry}");
+    assert!(
+        entry["timestamp"].is_string(),
+        "timestamp present, got {entry}"
+    );
 }
 
 #[test]
