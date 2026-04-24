@@ -41,6 +41,7 @@ impl<R: AsyncBufRead + Unpin + Send> StdinApprovalHandler<R> {
         }
     }
 
+    #[allow(dead_code)] // exercised by the lib's integration tests
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self

@@ -1,3 +1,4 @@
+mod approval_cli;
 mod cli;
 mod commands;
 mod renderer;

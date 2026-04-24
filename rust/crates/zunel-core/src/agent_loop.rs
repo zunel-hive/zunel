@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use zunel_config::AgentDefaults;
 use zunel_providers::{ChatMessage, GenerationSettings, LLMProvider, Role, StreamEvent};
 
-use crate::approval::{AllowAllApprovalHandler, ApprovalHandler};
+use crate::approval::{AllowAllApprovalHandler, ApprovalHandler, ApprovalScope};
 use crate::error::Result;
 use crate::runner::{AgentRunSpec, AgentRunner};
 use crate::session::{ChatRole, Session, SessionManager};
@@ -52,6 +52,8 @@ pub struct AgentLoop {
     sessions: Option<Arc<SessionManager>>,
     tools: ToolRegistry,
     approval: Arc<dyn ApprovalHandler>,
+    approval_required: bool,
+    approval_scope: ApprovalScope,
     workspace: std::path::PathBuf,
 }
 
@@ -64,6 +66,8 @@ impl AgentLoop {
             sessions: None,
             tools: ToolRegistry::new(),
             approval: Arc::new(AllowAllApprovalHandler),
+            approval_required: false,
+            approval_scope: ApprovalScope::default(),
             workspace: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
         }
     }
@@ -80,6 +84,8 @@ impl AgentLoop {
             sessions: Some(Arc::new(sessions)),
             tools: ToolRegistry::new(),
             approval: Arc::new(AllowAllApprovalHandler),
+            approval_required: false,
+            approval_scope: ApprovalScope::default(),
             workspace: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
         }
     }
@@ -95,9 +101,27 @@ impl AgentLoop {
         self
     }
 
+    pub fn with_approval_required(mut self, required: bool) -> Self {
+        self.approval_required = required;
+        self
+    }
+
+    pub fn with_approval_scope(mut self, scope: ApprovalScope) -> Self {
+        self.approval_scope = scope;
+        self
+    }
+
     pub fn with_workspace(mut self, workspace: std::path::PathBuf) -> Self {
         self.workspace = workspace;
         self
+    }
+
+    pub fn tools(&self) -> &ToolRegistry {
+        &self.tools
+    }
+
+    pub fn register_tool(&mut self, tool: Arc<dyn zunel_tools::Tool>) {
+        self.tools.register(tool);
     }
 
     fn settings(&self) -> GenerationSettings {
@@ -168,8 +192,8 @@ impl AgentLoop {
                     max_iterations: 15,
                     workspace: self.workspace.clone(),
                     session_key: session_key.into(),
-                    approval_required: false,
-                    approval_scope: crate::ApprovalScope::default(),
+                    approval_required: self.approval_required,
+                    approval_scope: self.approval_scope,
                 },
                 sink,
             )

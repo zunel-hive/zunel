@@ -31,6 +31,64 @@ fn parses_minimal_fixture() {
 }
 
 #[test]
+fn tools_section_defaults_when_absent() {
+    let json = r#"{
+        "providers": {},
+        "agents": { "defaults": { "model": "m" } }
+    }"#;
+    let cfg: zunel_config::Config = serde_json::from_str(json).unwrap();
+    assert!(!cfg.tools.exec.enable, "exec must be opt-in");
+    assert!(!cfg.tools.web.enable, "web must be opt-in");
+    assert!(
+        cfg.tools.web.search_provider.is_empty(),
+        "search_provider defaults to unset"
+    );
+    assert!(
+        !cfg.tools.approval_required,
+        "approval_required defaults off"
+    );
+    assert!(cfg.tools.filesystem.media_dir.is_none());
+}
+
+#[test]
+fn tools_section_round_trips() {
+    let json = r#"{
+        "providers": {},
+        "agents": { "defaults": { "model": "m" } },
+        "tools": {
+            "approval_required": true,
+            "approval_scope": "shell",
+            "exec": {
+                "enable": true,
+                "default_timeout_secs": 30,
+                "max_timeout_secs": 600
+            },
+            "web": {
+                "enable": true,
+                "search_provider": "brave",
+                "brave_api_key": "k"
+            },
+            "filesystem": {
+                "media_dir": "/tmp/media"
+            }
+        }
+    }"#;
+    let cfg: zunel_config::Config = serde_json::from_str(json).unwrap();
+    assert!(cfg.tools.exec.enable);
+    assert_eq!(cfg.tools.exec.default_timeout_secs, 30);
+    assert_eq!(cfg.tools.exec.max_timeout_secs, 600);
+    assert!(cfg.tools.web.enable);
+    assert_eq!(cfg.tools.web.search_provider, "brave");
+    assert_eq!(cfg.tools.web.brave_api_key.as_deref(), Some("k"));
+    assert_eq!(
+        cfg.tools.filesystem.media_dir.as_deref(),
+        Some(std::path::Path::new("/tmp/media"))
+    );
+    assert!(cfg.tools.approval_required);
+    assert_eq!(cfg.tools.approval_scope, "shell");
+}
+
+#[test]
 fn unknown_fields_ignored() {
     let json = r#"{
         "providers": {},

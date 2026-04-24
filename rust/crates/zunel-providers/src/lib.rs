@@ -9,7 +9,7 @@ mod tool_call_accumulator;
 
 pub use base::{
     ChatMessage, GenerationSettings, LLMProvider, LLMResponse, Role, StreamEvent, ToolCallDelta,
-    ToolCallRequest, ToolSchema, Usage,
+    ToolCallRequest, ToolProgress, ToolSchema, Usage,
 };
 pub use build::build_provider;
 pub use error::{Error, Result};

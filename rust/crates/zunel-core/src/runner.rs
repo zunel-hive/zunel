@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use zunel_providers::{
     ChatMessage, GenerationSettings, LLMProvider, Role, StreamEvent, ToolCallAccumulator,
-    ToolCallRequest,
+    ToolCallRequest, ToolProgress,
 };
 use zunel_tools::{ToolContext, ToolRegistry};
 
@@ -165,6 +165,12 @@ impl AgentRunner {
 
             for call in &calls {
                 tools_used.push(call.name.clone());
+                let _ = sink
+                    .send(StreamEvent::ToolProgress(ToolProgress::Start {
+                        index: call.index,
+                        name: call.name.clone(),
+                    }))
+                    .await;
                 if spec.approval_required && tool_requires_approval(&call.name, spec.approval_scope)
                 {
                     let req = ApprovalRequest {
@@ -181,6 +187,14 @@ impl AgentRunner {
                                 &call.name,
                                 "denied by user",
                             ));
+                            let _ = sink
+                                .send(StreamEvent::ToolProgress(ToolProgress::Done {
+                                    index: call.index,
+                                    name: call.name.clone(),
+                                    ok: false,
+                                    snippet: "denied".into(),
+                                }))
+                                .await;
                             continue;
                         }
                     }
@@ -190,6 +204,14 @@ impl AgentRunner {
                     .execute(&call.name, call.arguments.clone(), &ctx)
                     .await
                     .expect("registry never fails");
+                let _ = sink
+                    .send(StreamEvent::ToolProgress(ToolProgress::Done {
+                        index: call.index,
+                        name: call.name.clone(),
+                        ok: !result.is_error,
+                        snippet: progress_snippet(&result.content),
+                    }))
+                    .await;
                 messages.push(tool_result_message(&call.id, &call.name, &result.content));
             }
 
@@ -218,6 +240,17 @@ fn tool_result_message(tool_call_id: &str, _name: &str, content: &str) -> ChatMe
 
 fn describe_call(tc: &ToolCallRequest) -> String {
     format!("{}({})", tc.name, tc.arguments)
+}
+
+/// Trim a tool result down to a single line ≤ 80 chars suitable for
+/// rendering as inline progress (`[tool: read_file → ok 12 bytes]`).
+fn progress_snippet(content: &str) -> String {
+    let single = content.lines().next().unwrap_or("").trim();
+    if single.len() <= 80 {
+        single.to_string()
+    } else {
+        format!("{}…", &single[..79])
+    }
 }
 
 /// Apply the five-stage trim pipeline before sending history to the

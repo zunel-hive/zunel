@@ -121,6 +121,72 @@ async fn runner_executes_tool_then_final_content() {
 }
 
 #[tokio::test]
+async fn runner_emits_tool_progress_events_around_each_call() {
+    let turns_raw: Vec<Vec<StreamEvent>> = vec![
+        vec![
+            StreamEvent::ContentDelta("ok".into()),
+            done(Some("ok"), "stop"),
+        ],
+        vec![
+            StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_1".into()),
+                name: Some("echo".into()),
+                arguments_fragment: Some(r#"{"text":"hello"}"#.into()),
+            },
+            done(None, "tool_calls"),
+        ],
+    ];
+    let provider: Arc<dyn LLMProvider> = Arc::new(ScriptedProvider {
+        turns: Arc::new(Mutex::new(turns_raw)),
+    });
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
+    let runner = AgentRunner::new(provider, registry, Arc::new(AlwaysApprove));
+    let spec = AgentRunSpec {
+        initial_messages: vec![ChatMessage::user("call echo")],
+        model: "m".into(),
+        max_iterations: 5,
+        workspace: std::env::temp_dir(),
+        session_key: "cli:direct".into(),
+        ..Default::default()
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let collector = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(e) = rx.recv().await {
+            events.push(e);
+        }
+        events
+    });
+
+    let _ = runner.run(spec, tx).await.unwrap();
+    let events = collector.await.unwrap();
+
+    let mut start_seen = false;
+    let mut done_seen = false;
+    for e in &events {
+        if let StreamEvent::ToolProgress(p) = e {
+            match p {
+                zunel_providers::ToolProgress::Start { name, .. } => {
+                    assert_eq!(name, "echo");
+                    start_seen = true;
+                }
+                zunel_providers::ToolProgress::Done { name, ok, .. } => {
+                    assert_eq!(name, "echo");
+                    assert!(*ok);
+                    done_seen = true;
+                }
+            }
+        }
+    }
+    assert!(start_seen, "no ToolProgress::Start emitted: {events:?}");
+    assert!(done_seen, "no ToolProgress::Done emitted: {events:?}");
+}
+
+#[tokio::test]
 async fn runner_reports_max_iterations_when_model_never_stops() {
     let mut turns_raw: Vec<Vec<StreamEvent>> = Vec::new();
     for _ in 0..4 {

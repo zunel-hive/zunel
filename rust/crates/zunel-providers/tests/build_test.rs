@@ -21,6 +21,7 @@ fn config_with_custom() -> Config {
                 workspace: None,
             },
         },
+        tools: Default::default(),
     }
 }
 

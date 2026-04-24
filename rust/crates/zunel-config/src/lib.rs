@@ -12,5 +12,6 @@ pub use paths::{
     zunel_home,
 };
 pub use schema::{
-    AgentDefaults, AgentsConfig, CodexProvider, Config, CustomProvider, ProvidersConfig,
+    AgentDefaults, AgentsConfig, CodexProvider, Config, CustomProvider, ExecToolsConfig,
+    FilesystemToolsConfig, ProvidersConfig, ToolsConfig, WebToolsConfig,
 };

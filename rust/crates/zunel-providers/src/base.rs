@@ -157,10 +157,29 @@ pub enum StreamEvent {
         name: Option<String>,
         arguments_fragment: Option<String>,
     },
+    /// Synthetic event emitted by the agent runner (not the SSE
+    /// parser) when a tool starts/finishes executing. Used by the CLI
+    /// renderer to print `[tool: name → ok]` style progress lines
+    /// without re-implementing tool-call accumulation in the renderer.
+    ToolProgress(ToolProgress),
     /// Terminal event carrying the complete response (content, tool calls,
     /// usage, finish_reason). Producers must emit exactly one `Done`
     /// per stream.
     Done(LLMResponse),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolProgress {
+    Start {
+        index: u32,
+        name: String,
+    },
+    Done {
+        index: u32,
+        name: String,
+        ok: bool,
+        snippet: String,
+    },
 }
 
 #[async_trait]

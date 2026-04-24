@@ -39,6 +39,7 @@ fn config_with_base(api_base: String) -> Config {
                 workspace: None,
             },
         },
+        tools: Default::default(),
     }
 }
 

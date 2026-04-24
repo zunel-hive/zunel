@@ -97,7 +97,11 @@ url = "2"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-panic = "abort"
+# panic = "abort" disabled while we depend on html2md, whose [lib]
+# declares dylib/staticlib crate types that can only be built under
+# panic = unwind. Re-enable once zunel-tools::web swaps to a crate
+# without this restriction or once we vendor a minimal converter.
+panic = "unwind"
 
 # The profile that 'dist' will build with
 [profile.dist]

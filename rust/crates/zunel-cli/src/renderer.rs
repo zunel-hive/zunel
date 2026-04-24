@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use tokio::sync::mpsc::Receiver;
-use zunel_providers::StreamEvent;
+use zunel_providers::{StreamEvent, ToolProgress};
 
 use crate::spinner::ThinkingSpinner;
 
@@ -48,10 +48,38 @@ impl StreamingRenderer {
                         writeln!(stdout)?;
                     }
                 }
-                // Tool-call progress rendering lands in Task 16.
-                // Slice 2's renderer deliberately drops deltas so
-                // existing fixtures stay green.
+                // Per-token tool-call deltas don't render directly;
+                // the runner consolidates them and emits ToolProgress
+                // events instead.
                 StreamEvent::ToolCallDelta { .. } => {}
+                StreamEvent::ToolProgress(progress) => {
+                    if let Some(spinner) = self.spinner.take() {
+                        spinner.stop().await;
+                    }
+                    if self.wrote_anything {
+                        writeln!(stdout)?;
+                        self.wrote_anything = false;
+                        // After a tool line we may resume streaming
+                        // assistant content on the next iteration —
+                        // that path will reprint the header.
+                        self.header_printed = false;
+                    }
+                    let line = match progress {
+                        ToolProgress::Start { name, .. } => format!("[tool: {name} …]"),
+                        ToolProgress::Done {
+                            name, ok, snippet, ..
+                        } => {
+                            let tag = if ok { "ok" } else { "error" };
+                            if snippet.is_empty() {
+                                format!("[tool: {name} → {tag}]")
+                            } else {
+                                format!("[tool: {name} → {tag} {snippet}]")
+                            }
+                        }
+                    };
+                    writeln!(stdout, "{line}")?;
+                    stdout.flush()?;
+                }
             }
         }
 
