@@ -73,6 +73,7 @@ zunel-tokens = { path = "crates/zunel-tokens", version = "=0.2.0" }
 zunel-skills = { path = "crates/zunel-skills", version = "=0.2.0" }
 zunel-context = { path = "crates/zunel-context", version = "=0.2.0" }
 zunel-tools = { path = "crates/zunel-tools", version = "=0.2.0" }
+zunel-mcp = { path = "crates/zunel-mcp", version = "=0.2.0" }
 zunel-core = { path = "crates/zunel-core", version = "=0.2.0" }
 
 # Token counting

@@ -18,6 +18,7 @@ tokio.workspace = true
 tracing.workspace = true
 zunel-bus.workspace = true
 zunel-config.workspace = true
+zunel-mcp.workspace = true
 zunel-providers.workspace = true
 zunel-tokens.workspace = true
 zunel-tools.workspace = true

@@ -3387,6 +3387,7 @@ dependencies = [
  "wiremock",
  "zunel-bus",
  "zunel-config",
+ "zunel-mcp",
  "zunel-providers",
  "zunel-tokens",
  "zunel-tools",

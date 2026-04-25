@@ -8,7 +8,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use zunel_config::{Config, WebToolsConfig};
+use tokio::sync::Mutex;
+use zunel_config::{Config, McpServerConfig, WebToolsConfig};
+use zunel_mcp::{McpToolWrapper, StdioMcpClient};
 use zunel_tools::{
     fs::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool},
     path_policy::PathPolicy,
@@ -40,6 +42,69 @@ pub fn build_default_registry(cfg: &Config, workspace: &Path) -> ToolRegistry {
         registry.register(Arc::new(WebSearchTool::new(provider)));
     }
     registry
+}
+
+pub async fn build_default_registry_async(cfg: &Config, workspace: &Path) -> ToolRegistry {
+    let mut registry = build_default_registry(cfg, workspace);
+    register_mcp_tools(&mut registry, cfg).await;
+    registry
+}
+
+async fn register_mcp_tools(registry: &mut ToolRegistry, cfg: &Config) {
+    for (server_name, server) in &cfg.tools.mcp_servers {
+        if !is_stdio_server(server) {
+            tracing::warn!(server = %server_name, "skipping non-stdio MCP server");
+            continue;
+        }
+        let Some(command) = server.command.as_deref() else {
+            tracing::warn!(server = %server_name, "skipping MCP server without command");
+            continue;
+        };
+        let args = server.args.clone().unwrap_or_default();
+        let env = server.env.clone().unwrap_or_default();
+        let init_timeout = server.init_timeout.unwrap_or(10);
+        let tool_timeout = server.tool_timeout.unwrap_or(30);
+        let mut client = match StdioMcpClient::connect(command, &args, env, init_timeout).await {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(server = %server_name, error = %err, "failed to initialize MCP server");
+                continue;
+            }
+        };
+        let tools = match client.list_tools(tool_timeout).await {
+            Ok(tools) => tools,
+            Err(err) => {
+                tracing::warn!(server = %server_name, error = %err, "failed to list MCP tools");
+                continue;
+            }
+        };
+        let client = Arc::new(Mutex::new(client));
+        for tool in tools {
+            let wrapped_name = format!("mcp_{server_name}_{}", tool.name);
+            if !tool_enabled(server, &tool.name, &wrapped_name) {
+                continue;
+            }
+            registry.register(Arc::new(McpToolWrapper::new(
+                server_name,
+                tool,
+                Arc::clone(&client),
+                tool_timeout,
+            )));
+        }
+    }
+}
+
+fn is_stdio_server(server: &McpServerConfig) -> bool {
+    matches!(server.transport_type.as_deref().unwrap_or("stdio"), "stdio")
+}
+
+fn tool_enabled(server: &McpServerConfig, raw_name: &str, wrapped_name: &str) -> bool {
+    let Some(enabled) = &server.enabled_tools else {
+        return true;
+    };
+    enabled
+        .iter()
+        .any(|name| name == raw_name || name == wrapped_name)
 }
 
 fn build_search_provider(cfg: &WebToolsConfig) -> Box<dyn WebSearchProvider> {

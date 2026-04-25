@@ -15,7 +15,7 @@ pub use approval::{
     ApprovalHandler, ApprovalRequest, ApprovalScope, CachedApprovalHandler,
 };
 pub use command::{CommandContext, CommandOutcome, CommandRouter};
-pub use default_tools::build_default_registry;
+pub use default_tools::{build_default_registry, build_default_registry_async};
 pub use error::{Error, Result};
 pub use runner::{AgentRunResult, AgentRunSpec, AgentRunner, StopReason};
 pub use session::{ChatRole, Session, SessionManager};

@@ -53,7 +53,7 @@ impl Zunel {
         })?;
         let provider: Arc<dyn LLMProvider> = zunel_providers::build_provider(&cfg)?;
         let sessions = SessionManager::new(&workspace);
-        let registry = zunel_core::build_default_registry(&cfg, &workspace);
+        let registry = zunel_core::build_default_registry_async(&cfg, &workspace).await;
         let inner = AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions)
             .with_tools(registry)
             .with_workspace(workspace);

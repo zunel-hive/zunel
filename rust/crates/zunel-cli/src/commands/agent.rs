@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use zunel_core::{
-    build_default_registry, AgentLoop, ApprovalHandler, ApprovalScope, SessionManager,
+    build_default_registry_async, AgentLoop, ApprovalHandler, ApprovalScope, SessionManager,
 };
 
 use crate::approval_cli::StdinApprovalHandler;
@@ -21,7 +21,7 @@ pub async fn run(args: AgentArgs, config_path: Option<&Path>) -> Result<()> {
 
     let provider = zunel_providers::build_provider(&cfg).with_context(|| "building provider")?;
     let sessions = SessionManager::new(&workspace);
-    let registry = build_default_registry(&cfg, &workspace);
+    let registry = build_default_registry_async(&cfg, &workspace).await;
     let mut builder =
         AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions.clone())
             .with_tools(registry)
