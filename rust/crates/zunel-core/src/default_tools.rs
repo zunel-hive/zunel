@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 use zunel_config::{Config, McpServerConfig, WebToolsConfig};
 use zunel_mcp::{McpToolWrapper, StdioMcpClient};
 use zunel_tools::{
+    cron::CronTool,
     fs::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool},
     path_policy::PathPolicy,
     search::{GlobTool, GrepTool},
@@ -40,6 +41,9 @@ pub fn build_default_registry(cfg: &Config, workspace: &Path) -> ToolRegistry {
         registry.register(Arc::new(WebFetchTool::new()));
         let provider = build_search_provider(&cfg.tools.web);
         registry.register(Arc::new(WebSearchTool::new(provider)));
+    }
+    if let Ok(home) = zunel_config::zunel_home() {
+        registry.register(Arc::new(CronTool::new(home.join("cron.json"), "UTC")));
     }
     registry
 }

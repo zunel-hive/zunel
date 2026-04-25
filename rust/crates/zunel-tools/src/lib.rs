@@ -1,6 +1,7 @@
 //! Local tools for zunel: filesystem, search, shell, web, plus the
 //! `Tool` trait and `ToolRegistry` everything else registers through.
 
+pub mod cron;
 pub mod error;
 pub mod file_state;
 pub mod fs;
@@ -8,7 +9,9 @@ pub mod path_policy;
 mod registry;
 pub mod schema;
 pub mod search;
+pub mod self_tool;
 pub mod shell;
+pub mod spawn;
 pub mod ssrf;
 mod tool;
 pub mod web;

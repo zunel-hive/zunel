@@ -79,6 +79,7 @@ async fn async_default_registry_loads_stdio_mcp_tools_after_native_tools() {
     );
 
     let registry = build_default_registry_async(&cfg, dir.path()).await;
+    assert!(registry.get("cron").is_some());
     assert!(registry.get("mcp_fixture_echo").is_some());
     assert!(registry.get("mcp_fixture_bad name").is_none());
 
