@@ -37,8 +37,11 @@ while True:
     method = msg.get("method")
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "fixture", "version": "1"}}})
+    elif method == "notifications/initialized":
+        pass
     elif method == "tools/list":
-        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": [{"name": "echo", "description": "Echo text", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}})
+        send({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"message": "listing"}})
+        send({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": [{"name": "echo", "description": "Echo text", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}, {"name": "bad name", "description": "Invalid name", "inputSchema": {"type": "object", "properties": {}}}]}})
     elif method == "tools/call":
         text = msg.get("params", {}).get("arguments", {}).get("text", "")
         send({"jsonrpc": "2.0", "id": msg["id"], "result": {"content": [{"type": "text", "text": "echo:" + text}]}})
@@ -77,6 +80,7 @@ async fn async_default_registry_loads_stdio_mcp_tools_after_native_tools() {
 
     let registry = build_default_registry_async(&cfg, dir.path()).await;
     assert!(registry.get("mcp_fixture_echo").is_some());
+    assert!(registry.get("mcp_fixture_bad name").is_none());
 
     let definitions = registry.get_definitions();
     let names: Vec<&str> = definitions

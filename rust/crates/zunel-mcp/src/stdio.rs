@@ -36,6 +36,7 @@ impl StdioMcpClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .spawn()?;
         let stdin = child
             .stdin
@@ -64,6 +65,9 @@ impl StdioMcpClient {
         )
         .await
         .map_err(|_| Error::Timeout(init_timeout_secs))??;
+        client
+            .notify("notifications/initialized", json!({}))
+            .await?;
         Ok(client)
     }
 
@@ -73,7 +77,10 @@ impl StdioMcpClient {
             self.request("tools/list", json!({})),
         )
         .await
-        .map_err(|_| Error::Timeout(timeout_secs))??;
+        .map_err(|_| {
+            self.kill_child();
+            Error::Timeout(timeout_secs)
+        })??;
         let tools = response
             .get("tools")
             .and_then(Value::as_array)
@@ -112,7 +119,10 @@ impl StdioMcpClient {
             self.request("tools/call", json!({"name": name, "arguments": arguments})),
         )
         .await
-        .map_err(|_| Error::Timeout(timeout_secs))??;
+        .map_err(|_| {
+            self.kill_child();
+            Error::Timeout(timeout_secs)
+        })??;
         Ok(render_call_result(&response))
     }
 
@@ -126,20 +136,42 @@ impl StdioMcpClient {
             "params": params,
         });
         write_frame(&mut self.stdin, &request).await?;
-        let response = read_frame(&mut self.stdout).await?;
-        if let Some(error) = response.get("error") {
-            return Err(Error::Protocol(format!("MCP {method} failed: {error}")));
+        loop {
+            let response = read_frame(&mut self.stdout).await?;
+            let response_id = response.get("id").and_then(Value::as_u64);
+            if response_id.is_none() {
+                continue;
+            }
+            if response_id != Some(id) {
+                tracing::debug!(
+                    method,
+                    expected = id,
+                    got = ?response_id,
+                    "ignoring MCP response for a different request"
+                );
+                continue;
+            }
+            if let Some(error) = response.get("error") {
+                return Err(Error::Protocol(format!("MCP {method} failed: {error}")));
+            }
+            return response
+                .get("result")
+                .cloned()
+                .ok_or_else(|| Error::Protocol(format!("MCP {method} response missing result")));
         }
-        let response_id = response.get("id").and_then(Value::as_u64);
-        if response_id != Some(id) {
-            return Err(Error::Protocol(format!(
-                "MCP response id mismatch: expected {id}, got {response_id:?}"
-            )));
-        }
-        response
-            .get("result")
-            .cloned()
-            .ok_or_else(|| Error::Protocol(format!("MCP {method} response missing result")))
+    }
+
+    async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        write_frame(&mut self.stdin, &request).await
+    }
+
+    fn kill_child(&mut self) {
+        let _ = self._child.start_kill();
     }
 }
 

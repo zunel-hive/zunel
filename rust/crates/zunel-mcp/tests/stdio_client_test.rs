@@ -37,7 +37,10 @@ while True:
     method = msg.get("method")
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": msg["id"], "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "fixture", "version": "1"}}})
+    elif method == "notifications/initialized":
+        pass
     elif method == "tools/list":
+        send({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"message": "listing"}})
         send({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": [{"name": "echo", "description": "Echo text", "inputSchema": {"type": "object", "properties": {"text": {"type": ["string", "null"]}}}}]}})
     elif method == "tools/call":
         text = msg.get("params", {}).get("arguments", {}).get("text", "")

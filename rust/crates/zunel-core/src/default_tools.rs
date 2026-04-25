@@ -81,6 +81,15 @@ async fn register_mcp_tools(registry: &mut ToolRegistry, cfg: &Config) {
         let client = Arc::new(Mutex::new(client));
         for tool in tools {
             let wrapped_name = format!("mcp_{server_name}_{}", tool.name);
+            if !valid_tool_name(&wrapped_name) {
+                tracing::warn!(
+                    server = %server_name,
+                    tool = %tool.name,
+                    wrapped = %wrapped_name,
+                    "skipping MCP tool with invalid provider function name"
+                );
+                continue;
+            }
             if !tool_enabled(server, &tool.name, &wrapped_name) {
                 continue;
             }
@@ -92,6 +101,14 @@ async fn register_mcp_tools(registry: &mut ToolRegistry, cfg: &Config) {
             )));
         }
     }
+}
+
+fn valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn is_stdio_server(server: &McpServerConfig) -> bool {
