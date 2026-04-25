@@ -269,3 +269,65 @@ rather than a new slice:
   authorizes)
 - Next: slice 4 spec (Codex provider + MCP client + remaining tools).
 
+## Slice 4
+
+Measurements after slice 4 (Codex provider + stdio MCP client + cron/spawn/self
+tools + subagents/hooks). Same methodology as slice 3.
+
+### Startup
+
+| Implementation       | Mean    | Min    | Max    |
+| -------------------- | ------- | ------ | ------ |
+| Python zunel         | 348.7   | 339.4  | 371.6  |
+| Rust zunel (slice 3) |  55.6   |  50.2  |  61.8  |
+| Rust zunel (slice 4) |  57.1   |  51.4  |  65.5  |
+
+All values in milliseconds. Slice 4 startup is +1.5 ms (+2.7%) vs slice 3,
+inside the <=10% per-slice budget.
+
+### Memory (peak RSS)
+
+| Implementation       | Peak RSS  |
+| -------------------- | --------- |
+| Python zunel         |  56.4 MiB |
+| Rust zunel (slice 3) |   7.33 MiB |
+| Rust zunel (slice 4) |   7.33 MiB |
+
+Slice 4 RSS is effectively flat vs slice 3 on the `--version` path and remains
+about 7.7x smaller than Python.
+
+### Binary size
+
+- Rust release stripped: **7.82 MiB** (`target/release/zunel`, arm64 macOS)
+- Delta vs slice 3: **+0.32 MiB** (+4.3%)
+- The binary remains over the aspirational <=7 MiB target. The primary new
+  Slice 4 additions are the Codex Responses mapper/provider, stdio MCP client,
+  and subagent/hook/tool plumbing. The Slice 3 deferred size work still applies.
+
+### Notes
+
+- New crate this slice: `zunel-mcp`.
+- New CLI provider path: `providers.codex` via file-backed Codex CLI auth.
+- New MCP support: stdio MCP servers configured through `tools.mcpServers`.
+- New tools: `cron` CRUD, `spawn`, and read-only `self`.
+- Gateway, scheduler execution, Dream, and built-in Rust MCP server binaries
+  remain out of scope for this Rust slice.
+
+## Slice 4 Exit
+
+- Commit range: `rust-slice-3..HEAD` before the exit docs commit.
+- Test count: 177 tests (`cargo test --workspace -- --list` filtered to test
+  cases).
+- Release build: clean on `cargo build --release --workspace`.
+- Clippy: clean with `cargo clippy --workspace --all-targets -- -D warnings`.
+- Rustfmt: clean on `cargo fmt --all -- --check`.
+- cargo-deny: advisories + bans + licenses + sources all ok. Existing warnings
+  remain for unmatched license allowances and duplicate `rustix` /
+  `linux-raw-sys` versions.
+- Static binary: **7.82 MiB** (macOS arm64, stripped; +0.32 MiB vs slice 3).
+- Startup delta vs slice 3: **+2.7%** (57.1 ms vs 55.6 ms), inside the <=10%
+  per-slice budget.
+- Peak RSS delta vs slice 3: approximately **+0.00 MiB** (7.33 MiB vs 7.33
+  MiB).
+- Local tag: `rust-slice-4` (not pushed; local-only until user authorizes).
+

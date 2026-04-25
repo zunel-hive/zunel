@@ -31,6 +31,13 @@ the local CLI workflow and the Slack-backed gateway.
 | `zunel slack logout` | Delete the cached Slack user token |
 | `zunel plugins list` | Discover and list plugins under `<ZUNEL_HOME>/plugins/`. Shows name, version, declared lifecycle hooks, and on-disk path. Pass `--force`/`-f` to re-import every plugin module instead of using the cached discovery. See **Plugins** in [configuration.md](configuration.md) for the manifest format and hook contracts. |
 
+### Rust Slice 4 Notes
+
+The Rust CLI agent supports `providers.codex`, stdio MCP servers from
+`tools.mcpServers`, and the `cron`, `spawn`, and `self` tools. Rust does not
+yet include the Slack gateway runtime, scheduler loop, Dream, or built-in Rust
+MCP server binaries.
+
 ## Profiles
 
 Profiles are side-by-side zunel instances that live in their own home

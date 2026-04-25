@@ -245,6 +245,10 @@ Notes:
   surfaces a clear error asking you to re-run the `codex` CLI login.
 - Selection is strict: picking `"provider": "codex"` routes all calls through
   the Codex Responses endpoint. There is no silent fallback to `custom`.
+- Rust Slice 4 currently supports file-backed Codex auth at
+  `$CODEX_HOME/auth.json` or `~/.codex/auth.json`. If your Codex CLI is
+  configured for keyring-only credential storage, switch Codex to file-backed
+  storage or use `providers.custom`.
 
 ## Slack Channel Configuration
 
@@ -363,7 +367,7 @@ Supported search providers:
 
 Use `tools.web.proxy` if all web traffic should go through a proxy.
 
-## Shell, `my`, and MCP Tools
+## Shell, `self` / `my`, cron, spawn, and MCP Tools
 
 ### Shell exec
 
@@ -391,7 +395,7 @@ Important exec settings:
 | `sandbox` | Set to `"bwrap"` on Linux for bubblewrap isolation |
 | `allowedEnvKeys` | Environment variables that may pass through to subprocesses |
 
-### `my`
+### `self` / `my`
 
 ```json
 {
@@ -403,6 +407,21 @@ Important exec settings:
   }
 }
 ```
+
+Python exposes this tool as `my`. Rust Slice 4 exposes the same read-only
+inspection role as `self`; writes/sets are intentionally disabled in Rust.
+
+### Cron CRUD
+
+Rust Slice 4 registers `cron` for CRUD only. It reads and writes the
+Python-compatible store at `<workspace>/cron/jobs.json`; no Rust scheduler loop
+runs jobs yet.
+
+### Spawn
+
+Rust Slice 4 registers `spawn` in CLI/facade agent runs. It starts a bounded
+background subagent with an isolated child tool registry and reports status
+through the read-only `self` tool.
 
 ### Human-in-the-loop approval gate
 
@@ -473,6 +492,10 @@ Supported fields:
 | `url` / `headers` | Remote HTTP or SSE MCP server |
 | `toolTimeout` | Per-tool timeout in seconds |
 | `enabledTools` | Allow all tools, none, or a named subset |
+
+Rust Slice 4 implements stdio MCP clients. HTTP/SSE config fields are accepted
+for schema parity, but remote MCP transports and MCP OAuth remain Python-only
+until a later Rust slice.
 
 Header values support `${VAR}` substitution against the process environment,
 so you can keep secrets out of `config.json`:

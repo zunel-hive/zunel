@@ -109,6 +109,14 @@ zunel gateway
 The gateway runs Slack, cron, Dream, and heartbeat using the same workspace and
 agent defaults as the CLI.
 
+## Rust Rewrite Status
+
+The Rust binary under `rust/` now covers the Slice 4 CLI surface: `custom` and
+`codex` providers, local tools, stdio MCP client tools from
+`tools.mcpServers`, cron CRUD state, `spawn` subagents, and read-only `self`
+inspection. Gateway services and built-in Rust MCP server binaries remain
+Python-only until later slices.
+
 ## Commands
 
 ```text
