@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use zunel_providers::{ChatMessage, LLMProvider};
 use zunel_tools::self_tool::{SelfState, SelfStateProvider, SubagentSummary};
 use zunel_tools::spawn::SpawnHandle;
@@ -28,7 +29,9 @@ pub struct SubagentManager {
     provider: Arc<dyn LLMProvider>,
     workspace: std::path::PathBuf,
     model: String,
+    child_tools: ToolRegistry,
     statuses: Arc<Mutex<BTreeMap<String, SubagentStatus>>>,
+    handles: Arc<Mutex<BTreeMap<String, JoinHandle<()>>>>,
     counter: AtomicUsize,
 }
 
@@ -75,9 +78,16 @@ impl SubagentManager {
             provider,
             workspace,
             model,
+            child_tools: ToolRegistry::new(),
             statuses: Arc::new(Mutex::new(BTreeMap::new())),
+            handles: Arc::new(Mutex::new(BTreeMap::new())),
             counter: AtomicUsize::new(1),
         }
+    }
+
+    pub fn with_child_tools(mut self, child_tools: ToolRegistry) -> Self {
+        self.child_tools = child_tools;
+        self
     }
 
     pub fn status(&self, id: &str) -> Option<SubagentStatus> {
@@ -86,6 +96,17 @@ impl SubagentManager {
 
     pub fn statuses(&self) -> Vec<SubagentStatus> {
         self.statuses.lock().unwrap().values().cloned().collect()
+    }
+
+    pub fn cancel(&self, id: &str) -> bool {
+        let Some(handle) = self.handles.lock().unwrap().remove(id) else {
+            return false;
+        };
+        handle.abort();
+        if let Some(status) = self.statuses.lock().unwrap().get_mut(id) {
+            status.phase = "cancelled".into();
+        }
+        true
     }
 
     fn next_id(&self) -> String {
@@ -117,15 +138,28 @@ impl SpawnHandle for SubagentManager {
 
         let provider = Arc::clone(&self.provider);
         let statuses = Arc::clone(&self.statuses);
+        let handles = Arc::clone(&self.handles);
         let workspace = self.workspace.clone();
         let model = self.model.clone();
+        let child_tools = self.child_tools.clone();
         let child_id = id.clone();
-        tokio::spawn(async move {
-            run_child(provider, statuses, child_id, task, model, workspace).await;
+        let handle = tokio::spawn(async move {
+            run_child(
+                provider,
+                statuses,
+                child_id.clone(),
+                task,
+                model,
+                workspace,
+                child_tools,
+            )
+            .await;
+            handles.lock().unwrap().remove(&child_id);
         });
+        self.handles.lock().unwrap().insert(id.clone(), handle);
 
         Ok(format!(
-            "Subagent [{label}] started (id: {id}). I'll notify you when it completes."
+            "Subagent [{label}] started (id: {id}). Use the self tool to inspect status and results."
         ))
     }
 }
@@ -137,9 +171,10 @@ async fn run_child(
     task: String,
     model: String,
     workspace: std::path::PathBuf,
+    child_tools: ToolRegistry,
 ) {
     let start = Instant::now();
-    let runner = AgentRunner::new(provider, ToolRegistry::new(), Arc::new(NoApproval));
+    let runner = AgentRunner::new(provider, child_tools, Arc::new(NoApproval));
     let (tx, mut rx) = mpsc::channel(16);
     let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let result = runner

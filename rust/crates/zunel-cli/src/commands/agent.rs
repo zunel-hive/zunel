@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use zunel_core::{
-    build_default_registry_async, AgentLoop, ApprovalHandler, ApprovalScope,
-    RuntimeSelfStateProvider, SessionManager, SubagentManager,
+    build_default_registry, build_default_registry_async, AgentLoop, ApprovalHandler,
+    ApprovalScope, RuntimeSelfStateProvider, SessionManager, SubagentManager,
 };
 use zunel_tools::{self_tool::SelfTool, spawn::SpawnTool};
 
@@ -24,11 +24,15 @@ pub async fn run(args: AgentArgs, config_path: Option<&Path>) -> Result<()> {
     let provider = zunel_providers::build_provider(&cfg).with_context(|| "building provider")?;
     let sessions = SessionManager::new(&workspace);
     let mut registry = build_default_registry_async(&cfg, &workspace).await;
-    let subagents = Arc::new(SubagentManager::new(
-        provider.clone(),
-        workspace.clone(),
-        cfg.agents.defaults.model.clone(),
-    ));
+    let child_tools = build_default_registry(&cfg, &workspace);
+    let subagents = Arc::new(
+        SubagentManager::new(
+            provider.clone(),
+            workspace.clone(),
+            cfg.agents.defaults.model.clone(),
+        )
+        .with_child_tools(child_tools),
+    );
     registry.register(Arc::new(SpawnTool::new(subagents.clone())));
     let mut tool_names: Vec<String> = registry.names().map(str::to_string).collect();
     tool_names.push("self".into());

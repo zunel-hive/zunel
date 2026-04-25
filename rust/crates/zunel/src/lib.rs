@@ -54,11 +54,15 @@ impl Zunel {
         let provider: Arc<dyn LLMProvider> = zunel_providers::build_provider(&cfg)?;
         let sessions = SessionManager::new(&workspace);
         let mut registry = zunel_core::build_default_registry_async(&cfg, &workspace).await;
-        let subagents = Arc::new(SubagentManager::new(
-            provider.clone(),
-            workspace.clone(),
-            cfg.agents.defaults.model.clone(),
-        ));
+        let child_tools = zunel_core::build_default_registry(&cfg, &workspace);
+        let subagents = Arc::new(
+            SubagentManager::new(
+                provider.clone(),
+                workspace.clone(),
+                cfg.agents.defaults.model.clone(),
+            )
+            .with_child_tools(child_tools),
+        );
         registry.register(Arc::new(zunel_tools::spawn::SpawnTool::new(
             subagents.clone(),
         )));

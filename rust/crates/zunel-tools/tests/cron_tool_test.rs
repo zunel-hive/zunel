@@ -7,7 +7,7 @@ use zunel_tools::{Tool, ToolContext};
 async fn cron_add_list_and_remove_job() {
     let dir = tempdir().unwrap();
     let state = dir.path().join("cron.json");
-    let tool = CronTool::new(state, "UTC");
+    let tool = CronTool::new(state.clone(), "UTC");
     let ctx = ToolContext::for_test();
 
     let created = tool
@@ -24,6 +24,11 @@ async fn cron_add_list_and_remove_job() {
         .nth(1)
         .unwrap()
         .trim_end_matches(')');
+    let store: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    assert_eq!(store["version"], 1);
+    assert_eq!(store["jobs"][0]["payload"]["message"], "remind me");
+    assert_eq!(store["jobs"][0]["schedule"]["everyMs"], 60000);
 
     let listed = tool.execute(json!({"action": "list"}), &ctx).await;
     assert!(listed.content.contains("standup"));
@@ -64,14 +69,20 @@ async fn cron_refuses_to_remove_protected_system_job() {
     let state = dir.path().join("cron.json");
     std::fs::write(
         &state,
-        r#"[{
-          "id": "dream",
-          "name": "dream",
-          "message": "system",
-          "schedule": {"kind": "every", "every_ms": 3600000},
-          "deliver": false,
-          "system": true
-        }]"#,
+        r#"{
+          "version": 1,
+          "jobs": [{
+            "id": "dream",
+            "name": "dream",
+            "enabled": true,
+            "schedule": {"kind": "every", "everyMs": 3600000},
+            "payload": {"kind": "system_event", "message": "system", "deliver": false},
+            "state": {},
+            "createdAtMs": 0,
+            "updatedAtMs": 0,
+            "deleteAfterRun": false
+          }]
+        }"#,
     )
     .unwrap();
     let tool = CronTool::new(state, "UTC");

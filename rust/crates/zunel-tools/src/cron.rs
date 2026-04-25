@@ -20,21 +20,26 @@ impl CronTool {
         }
     }
 
-    fn load_jobs(&self) -> Result<Vec<CronJob>, String> {
+    fn load_store(&self) -> Result<CronStore, String> {
         if !self.state_path.exists() {
-            return Ok(Vec::new());
+            return Ok(CronStore::default());
         }
         let raw = std::fs::read_to_string(&self.state_path)
             .map_err(|e| format!("failed to read cron state: {e}"))?;
+        if raw.trim_start().starts_with('[') {
+            let jobs: Vec<CronJob> = serde_json::from_str(&raw)
+                .map_err(|e| format!("failed to parse cron state: {e}"))?;
+            return Ok(CronStore { version: 1, jobs });
+        }
         serde_json::from_str(&raw).map_err(|e| format!("failed to parse cron state: {e}"))
     }
 
-    fn save_jobs(&self, jobs: &[CronJob]) -> Result<(), String> {
+    fn save_store(&self, store: &CronStore) -> Result<(), String> {
         if let Some(parent) = self.state_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create cron state dir: {e}"))?;
         }
-        let raw = serde_json::to_string_pretty(jobs)
+        let raw = serde_json::to_string_pretty(store)
             .map_err(|e| format!("failed to encode cron state: {e}"))?;
         std::fs::write(&self.state_path, raw)
             .map_err(|e| format!("failed to write cron state: {e}"))
@@ -53,8 +58,8 @@ impl CronTool {
             Ok(schedule) => schedule,
             Err(err) => return ToolResult::err(err),
         };
-        let mut jobs = match self.load_jobs() {
-            Ok(jobs) => jobs,
+        let mut store = match self.load_store() {
+            Ok(store) => store,
             Err(err) => return ToolResult::err(err),
         };
         let id = format!("job_{}", unix_millis());
@@ -64,29 +69,40 @@ impl CronTool {
             .filter(|s| !s.trim().is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| message.chars().take(30).collect());
-        jobs.push(CronJob {
+        let now = unix_millis() as u64;
+        store.jobs.push(CronJob {
             id: id.clone(),
             name: name.clone(),
-            message: message.to_string(),
+            enabled: true,
             schedule,
-            deliver: args.get("deliver").and_then(Value::as_bool).unwrap_or(true),
-            system: false,
+            payload: CronPayload {
+                kind: "agent_turn".into(),
+                message: message.to_string(),
+                deliver: args.get("deliver").and_then(Value::as_bool).unwrap_or(true),
+                channel: None,
+                to: None,
+            },
+            state: CronJobState::default(),
+            created_at_ms: now,
+            updated_at_ms: now,
+            delete_after_run: args.get("at").is_some(),
         });
-        if let Err(err) = self.save_jobs(&jobs) {
+        if let Err(err) = self.save_store(&store) {
             return ToolResult::err(err);
         }
         ToolResult::ok(format!("Created job '{name}' (id: {id})"))
     }
 
     fn list_jobs(&self) -> ToolResult {
-        let jobs = match self.load_jobs() {
-            Ok(jobs) => jobs,
+        let store = match self.load_store() {
+            Ok(store) => store,
             Err(err) => return ToolResult::err(err),
         };
-        if jobs.is_empty() {
+        if store.jobs.is_empty() {
             return ToolResult::ok("No scheduled jobs.");
         }
-        let lines: Vec<String> = jobs
+        let lines: Vec<String> = store
+            .jobs
             .iter()
             .map(|job| {
                 let mut line = format!(
@@ -95,7 +111,7 @@ impl CronTool {
                     job.id,
                     format_schedule(&job.schedule)
                 );
-                if job.system {
+                if job.is_protected() {
                     line.push_str("\n  Protected: visible for inspection, but cannot be removed.");
                 }
                 line
@@ -113,19 +129,19 @@ impl CronTool {
         if job_id.is_empty() {
             return ToolResult::err("job_id is required when action='remove'");
         }
-        let mut jobs = match self.load_jobs() {
-            Ok(jobs) => jobs,
+        let mut store = match self.load_store() {
+            Ok(store) => store,
             Err(err) => return ToolResult::err(err),
         };
-        if let Some(job) = jobs.iter().find(|job| job.id == job_id) {
-            if job.system {
+        if let Some(job) = store.jobs.iter().find(|job| job.id == job_id) {
+            if job.is_protected() {
                 return ToolResult::err("Protected system job cannot be removed.");
             }
         } else {
             return ToolResult::err(format!("No job found with id: {job_id}"));
         }
-        jobs.retain(|job| job.id != job_id);
-        if let Err(err) = self.save_jobs(&jobs) {
+        store.jobs.retain(|job| job.id != job_id);
+        if let Err(err) = self.save_store(&store) {
             return ToolResult::err(err);
         }
         ToolResult::ok(format!("Removed job {job_id}"))
@@ -172,26 +188,98 @@ impl Tool for CronTool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct CronStore {
+    #[serde(default = "default_version")]
+    version: u32,
+    #[serde(default)]
+    jobs: Vec<CronJob>,
+}
+
+impl Default for CronStore {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            jobs: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CronJob {
     id: String,
     name: String,
-    message: String,
-    schedule: CronSchedule,
     #[serde(default = "default_true")]
-    deliver: bool,
+    enabled: bool,
+    schedule: CronSchedule,
     #[serde(default)]
-    system: bool,
+    payload: CronPayload,
+    #[serde(default)]
+    state: CronJobState,
+    #[serde(default)]
+    created_at_ms: u64,
+    #[serde(default)]
+    updated_at_ms: u64,
+    #[serde(default)]
+    delete_after_run: bool,
+}
+
+impl CronJob {
+    fn is_protected(&self) -> bool {
+        self.payload.kind == "system_event" || self.name == "dream"
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CronPayload {
+    #[serde(default = "default_payload_kind")]
+    kind: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    deliver: bool,
+    channel: Option<String>,
+    to: Option<String>,
+}
+
+impl Default for CronPayload {
+    fn default() -> Self {
+        Self {
+            kind: default_payload_kind(),
+            message: String::new(),
+            deliver: false,
+            channel: None,
+            to: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CronJobState {
+    next_run_at_ms: Option<u64>,
+    last_run_at_ms: Option<u64>,
+    last_status: Option<String>,
+    last_error: Option<String>,
+    #[serde(default)]
+    run_history: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 enum CronSchedule {
     #[serde(rename = "every")]
-    Every { every_ms: u64 },
+    Every {
+        #[serde(rename = "everyMs")]
+        every_ms: u64,
+    },
     #[serde(rename = "cron")]
     Cron { expr: String, tz: Option<String> },
     #[serde(rename = "at")]
-    At { at: String },
+    At {
+        #[serde(rename = "atMs")]
+        at_ms: u64,
+    },
 }
 
 fn parse_schedule(args: &Value, default_timezone: &str) -> Result<CronSchedule, String> {
@@ -218,7 +306,9 @@ fn parse_schedule(args: &Value, default_timezone: &str) -> Result<CronSchedule, 
         if !at.contains('T') {
             return Err("at must be an ISO datetime like 2026-04-24T10:30:00".into());
         }
-        return Ok(CronSchedule::At { at: at.to_string() });
+        return Ok(CronSchedule::At {
+            at_ms: unix_millis() as u64,
+        });
     }
     Err("either every_seconds, cron_expr, or at is required".into())
 }
@@ -230,7 +320,7 @@ fn format_schedule(schedule: &CronSchedule) -> String {
             Some(tz) => format!("cron: {expr} ({tz})"),
             None => format!("cron: {expr}"),
         },
-        CronSchedule::At { at } => format!("at {at}"),
+        CronSchedule::At { at_ms } => format!("at {at_ms}"),
     }
 }
 
@@ -243,4 +333,12 @@ fn unix_millis() -> u128 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_version() -> u32 {
+    1
+}
+
+fn default_payload_kind() -> String {
+    "agent_turn".into()
 }

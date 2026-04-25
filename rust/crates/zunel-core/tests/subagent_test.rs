@@ -50,11 +50,12 @@ async fn subagent_manager_spawns_isolated_child_and_records_result() {
         .await
         .unwrap();
     assert!(message.contains("Subagent [demo] started"));
+    assert!(message.contains("self tool"));
     let id = message
         .split("id: ")
         .nth(1)
         .unwrap()
-        .trim_end_matches("). I'll notify you when it completes.");
+        .trim_end_matches("). Use the self tool to inspect status and results.");
 
     for _ in 0..50 {
         if manager

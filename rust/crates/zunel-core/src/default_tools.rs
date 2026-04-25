@@ -42,9 +42,10 @@ pub fn build_default_registry(cfg: &Config, workspace: &Path) -> ToolRegistry {
         let provider = build_search_provider(&cfg.tools.web);
         registry.register(Arc::new(WebSearchTool::new(provider)));
     }
-    if let Ok(home) = zunel_config::zunel_home() {
-        registry.register(Arc::new(CronTool::new(home.join("cron.json"), "UTC")));
-    }
+    registry.register(Arc::new(CronTool::new(
+        workspace.join("cron").join("jobs.json"),
+        "UTC",
+    )));
     registry
 }
 
