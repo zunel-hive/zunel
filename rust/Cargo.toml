@@ -9,6 +9,7 @@ members = [
     "crates/zunel-skills",
     "crates/zunel-context",
     "crates/zunel-tools",
+    "crates/zunel-mcp",
     "crates/zunel-core",
     "crates/zunel-cli",
     "crates/zunel",

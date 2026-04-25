@@ -3394,6 +3394,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zunel-mcp"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "zunel-tools",
+]
+
+[[package]]
 name = "zunel-providers"
 version = "0.2.0"
 dependencies = [
