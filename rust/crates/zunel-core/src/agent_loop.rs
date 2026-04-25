@@ -194,6 +194,7 @@ impl AgentLoop {
                     session_key: session_key.into(),
                     approval_required: self.approval_required,
                     approval_scope: self.approval_scope,
+                    hook: None,
                 },
                 sink,
             )

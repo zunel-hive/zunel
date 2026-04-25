@@ -3337,6 +3337,7 @@ dependencies = [
  "zunel-config",
  "zunel-core",
  "zunel-providers",
+ "zunel-tools",
  "zunel-util",
 ]
 

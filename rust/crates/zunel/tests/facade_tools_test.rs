@@ -57,4 +57,12 @@ async fn register_tool_shows_up_in_tools_listing_alongside_defaults() {
         names.iter().any(|n| n == "list_dir"),
         "missing list_dir in {names:?}"
     );
+    assert!(
+        names.iter().any(|n| n == "spawn"),
+        "missing spawn in {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "self"),
+        "missing self in {names:?}"
+    );
 }

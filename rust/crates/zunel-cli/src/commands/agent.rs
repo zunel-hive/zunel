@@ -4,8 +4,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use zunel_core::{
-    build_default_registry_async, AgentLoop, ApprovalHandler, ApprovalScope, SessionManager,
+    build_default_registry_async, AgentLoop, ApprovalHandler, ApprovalScope,
+    RuntimeSelfStateProvider, SessionManager, SubagentManager,
 };
+use zunel_tools::{self_tool::SelfTool, spawn::SpawnTool};
 
 use crate::approval_cli::StdinApprovalHandler;
 use crate::cli::AgentArgs;
@@ -21,7 +23,30 @@ pub async fn run(args: AgentArgs, config_path: Option<&Path>) -> Result<()> {
 
     let provider = zunel_providers::build_provider(&cfg).with_context(|| "building provider")?;
     let sessions = SessionManager::new(&workspace);
-    let registry = build_default_registry_async(&cfg, &workspace).await;
+    let mut registry = build_default_registry_async(&cfg, &workspace).await;
+    let subagents = Arc::new(SubagentManager::new(
+        provider.clone(),
+        workspace.clone(),
+        cfg.agents.defaults.model.clone(),
+    ));
+    registry.register(Arc::new(SpawnTool::new(subagents.clone())));
+    let mut tool_names: Vec<String> = registry.names().map(str::to_string).collect();
+    tool_names.push("self".into());
+    registry.register(Arc::new(SelfTool::from_provider(Arc::new(
+        RuntimeSelfStateProvider {
+            model: cfg.agents.defaults.model.clone(),
+            provider: cfg
+                .agents
+                .defaults
+                .provider
+                .clone()
+                .unwrap_or_else(|| "custom".into()),
+            workspace: workspace.display().to_string(),
+            max_iterations: 15,
+            tools: tool_names,
+            subagents,
+        },
+    ))));
     let mut builder =
         AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions.clone())
             .with_tools(registry)

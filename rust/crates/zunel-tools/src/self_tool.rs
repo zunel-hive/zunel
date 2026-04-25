@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -23,34 +25,41 @@ pub struct SubagentSummary {
 }
 
 pub struct SelfTool {
-    state: SelfState,
+    provider: Arc<dyn SelfStateProvider>,
 }
 
 impl SelfTool {
     pub fn new(state: SelfState) -> Self {
-        Self { state }
+        Self {
+            provider: Arc::new(StaticSelfStateProvider(state)),
+        }
+    }
+
+    pub fn from_provider(provider: Arc<dyn SelfStateProvider>) -> Self {
+        Self { provider }
     }
 
     fn render_summary(&self) -> String {
+        let state = self.provider.state();
         let mut lines = vec![
-            format!("model: {}", empty_as_unknown(&self.state.model)),
-            format!("provider: {}", empty_as_unknown(&self.state.provider)),
-            format!("workspace: {}", empty_as_unknown(&self.state.workspace)),
+            format!("model: {}", empty_as_unknown(&state.model)),
+            format!("provider: {}", empty_as_unknown(&state.provider)),
+            format!("workspace: {}", empty_as_unknown(&state.workspace)),
             format!(
                 "iterations: {}/{}",
-                self.state.current_iteration, self.state.max_iterations
+                state.current_iteration, state.max_iterations
             ),
             format!(
                 "tools: {} registered - {}",
-                self.state.tools.len(),
-                self.state.tools.join(", ")
+                state.tools.len(),
+                state.tools.join(", ")
             ),
         ];
-        if self.state.subagents.is_empty() {
+        if state.subagents.is_empty() {
             lines.push("subagents: none".into());
         } else {
-            lines.push(format!("subagents: {}", self.state.subagents.len()));
-            for subagent in &self.state.subagents {
+            lines.push(format!("subagents: {}", state.subagents.len()));
+            for subagent in &state.subagents {
                 lines.push(format!(
                     "  [{}] {} - phase: {}, iteration: {}",
                     subagent.id, subagent.label, subagent.phase, subagent.iteration
@@ -58,6 +67,18 @@ impl SelfTool {
             }
         }
         lines.join("\n")
+    }
+}
+
+pub trait SelfStateProvider: Send + Sync {
+    fn state(&self) -> SelfState;
+}
+
+struct StaticSelfStateProvider(SelfState);
+
+impl SelfStateProvider for StaticSelfStateProvider {
+    fn state(&self) -> SelfState {
+        self.0.clone()
     }
 }
 

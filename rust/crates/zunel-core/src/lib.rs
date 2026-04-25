@@ -5,8 +5,10 @@ pub mod approval;
 pub mod command;
 pub mod default_tools;
 mod error;
+pub mod hook;
 pub mod runner;
 mod session;
+pub mod subagent;
 pub mod trim;
 
 pub use agent_loop::{AgentLoop, RunResult};
@@ -17,5 +19,7 @@ pub use approval::{
 pub use command::{CommandContext, CommandOutcome, CommandRouter};
 pub use default_tools::{build_default_registry, build_default_registry_async};
 pub use error::{Error, Result};
+pub use hook::{AgentHook, AgentHookContext};
 pub use runner::{AgentRunResult, AgentRunSpec, AgentRunner, StopReason};
 pub use session::{ChatRole, Session, SessionManager};
+pub use subagent::{RuntimeSelfStateProvider, SubagentManager, SubagentStatus};

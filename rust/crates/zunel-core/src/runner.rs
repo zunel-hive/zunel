@@ -16,6 +16,7 @@ use zunel_tools::{ToolContext, ToolRegistry};
 use crate::approval::{
     tool_requires_approval, ApprovalDecision, ApprovalHandler, ApprovalRequest, ApprovalScope,
 };
+use crate::hook::{AgentHook, AgentHookContext};
 use crate::trim::{
     apply_tool_result_budget, backfill_missing_tool_results, chat_message_to_value,
     drop_orphan_tool_results, microcompact_old_tool_results, snip_history, value_to_chat_message,
@@ -41,6 +42,7 @@ pub struct AgentRunSpec {
     pub session_key: String,
     pub approval_required: bool,
     pub approval_scope: ApprovalScope,
+    pub hook: Option<Arc<dyn AgentHook>>,
 }
 
 impl Default for AgentRunSpec {
@@ -53,6 +55,7 @@ impl Default for AgentRunSpec {
             session_key: String::new(),
             approval_required: false,
             approval_scope: ApprovalScope::default(),
+            hook: None,
         }
     }
 }
@@ -110,6 +113,11 @@ impl AgentRunner {
 
         'outer: for iteration in 0..max_iter {
             tracing::debug!(iteration, "agent iteration");
+            let hook = spec.hook.as_ref();
+            if let Some(hook) = hook {
+                hook.before_iteration(AgentHookContext::new(iteration, messages.clone()))
+                    .await;
+            }
             let messages_for_model = trim_messages_for_provider(&messages)?;
             let (content, finish_reason, calls) = {
                 let stream = self.provider.generate_stream(
@@ -126,7 +134,15 @@ impl AgentRunner {
                     let event = event.map_err(crate::Error::Provider)?;
                     let _ = sink.send(event.clone()).await;
                     match &event {
-                        StreamEvent::ContentDelta(s) => content.push_str(s),
+                        StreamEvent::ContentDelta(s) => {
+                            content.push_str(s);
+                            if let Some(hook) = hook {
+                                let mut context =
+                                    AgentHookContext::new(iteration, messages_for_model.clone());
+                                context.final_content = Some(content.clone());
+                                hook.on_stream(context, s.clone()).await;
+                            }
+                        }
                         StreamEvent::Done(resp) => finish_reason = resp.finish_reason.clone(),
                         _ => {}
                     }
@@ -135,6 +151,16 @@ impl AgentRunner {
                 let calls = acc
                     .finalize()
                     .map_err(|e| crate::Error::ToolCallAssembly(e.to_string()))?;
+                if let Some(hook) = hook {
+                    let mut context = AgentHookContext::new(iteration, messages_for_model.clone());
+                    context.final_content = if content.is_empty() {
+                        None
+                    } else {
+                        Some(content.clone())
+                    };
+                    hook.on_stream_end(context, finish_reason.as_deref() == Some("length"))
+                        .await;
+                }
                 (content, finish_reason, calls)
             };
 
@@ -144,14 +170,31 @@ impl AgentRunner {
                 } else {
                     StopReason::Completed
                 };
-                last_content = content.clone();
+                let mut final_content = if content.is_empty() {
+                    None
+                } else {
+                    Some(content.clone())
+                };
+                if let Some(hook) = hook {
+                    let mut context = AgentHookContext::new(iteration, messages.clone());
+                    context.final_content = final_content.clone();
+                    context.stop_reason = Some(format!("{stop:?}"));
+                    final_content = hook.finalize_content(context, final_content);
+                }
+                last_content = final_content.clone().unwrap_or_default();
                 if !content.is_empty() {
                     messages.push(ChatMessage {
                         role: Role::Assistant,
-                        content,
+                        content: final_content.unwrap_or(content),
                         tool_call_id: None,
                         tool_calls: Vec::new(),
                     });
+                }
+                if let Some(hook) = hook {
+                    let mut context = AgentHookContext::new(iteration, messages.clone());
+                    context.final_content = Some(last_content.clone());
+                    context.stop_reason = Some(format!("{stop:?}"));
+                    hook.after_iteration(context).await;
                 }
                 break 'outer;
             }
@@ -163,6 +206,12 @@ impl AgentRunner {
                 tool_calls: calls.clone(),
             });
 
+            if let Some(hook) = hook {
+                let mut context = AgentHookContext::new(iteration, messages.clone());
+                context.tool_calls = calls.clone();
+                hook.before_execute_tools(context).await;
+            }
+            let mut iteration_results = Vec::new();
             for call in &calls {
                 tools_used.push(call.name.clone());
                 let _ = sink
@@ -213,10 +262,18 @@ impl AgentRunner {
                     }))
                     .await;
                 messages.push(tool_result_message(&call.id, &call.name, &result.content));
+                iteration_results.push(result);
             }
 
             if iteration + 1 == max_iter {
                 stop = StopReason::MaxIterations;
+            }
+            if let Some(hook) = hook {
+                let mut context = AgentHookContext::new(iteration, messages.clone());
+                context.tool_calls = calls.clone();
+                context.tool_results = iteration_results;
+                context.stop_reason = Some(format!("{stop:?}"));
+                hook.after_iteration(context).await;
             }
         }
 

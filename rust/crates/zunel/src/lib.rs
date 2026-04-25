@@ -18,8 +18,8 @@ use tokio::sync::mpsc;
 pub use zunel_config::{Config, Error as ConfigError};
 pub use zunel_core::{
     AgentLoop, ApprovalDecision, ApprovalHandler, ApprovalRequest, ApprovalScope, ChatRole,
-    CommandContext, CommandOutcome, CommandRouter, Error as CoreError, RunResult, Session,
-    SessionManager,
+    CommandContext, CommandOutcome, CommandRouter, Error as CoreError, RunResult,
+    RuntimeSelfStateProvider, Session, SessionManager, SubagentManager,
 };
 pub use zunel_providers::{Error as ProviderError, LLMProvider, StreamEvent, ToolProgress};
 pub use zunel_skills::{Skill, SkillsLoader};
@@ -53,7 +53,32 @@ impl Zunel {
         })?;
         let provider: Arc<dyn LLMProvider> = zunel_providers::build_provider(&cfg)?;
         let sessions = SessionManager::new(&workspace);
-        let registry = zunel_core::build_default_registry_async(&cfg, &workspace).await;
+        let mut registry = zunel_core::build_default_registry_async(&cfg, &workspace).await;
+        let subagents = Arc::new(SubagentManager::new(
+            provider.clone(),
+            workspace.clone(),
+            cfg.agents.defaults.model.clone(),
+        ));
+        registry.register(Arc::new(zunel_tools::spawn::SpawnTool::new(
+            subagents.clone(),
+        )));
+        let mut tool_names: Vec<String> = registry.names().map(str::to_string).collect();
+        tool_names.push("self".into());
+        registry.register(Arc::new(zunel_tools::self_tool::SelfTool::from_provider(
+            Arc::new(RuntimeSelfStateProvider {
+                model: cfg.agents.defaults.model.clone(),
+                provider: cfg
+                    .agents
+                    .defaults
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| "custom".into()),
+                workspace: workspace.display().to_string(),
+                max_iterations: 15,
+                tools: tool_names,
+                subagents,
+            }),
+        )));
         let inner = AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions)
             .with_tools(registry)
             .with_workspace(workspace);
