@@ -1,7 +1,7 @@
 # zunel
 
-[![CI](https://github.com/rdu16625/zunel/actions/workflows/rust-ci.yml/badge.svg?branch=main)](https://github.com/rdu16625/zunel/actions/workflows/rust-ci.yml)
-[![Release](https://img.shields.io/github/v/release/rdu16625/zunel?include_prereleases&sort=semver&display_name=tag&color=blue)](https://github.com/rdu16625/zunel/releases)
+[![CI](https://github.com/zunel-hive/zunel/actions/workflows/rust-ci.yml/badge.svg?branch=main)](https://github.com/zunel-hive/zunel/actions/workflows/rust-ci.yml)
+[![Release](https://img.shields.io/github/v/release/zunel-hive/zunel?include_prereleases&sort=semver&display_name=tag&color=blue)](https://github.com/zunel-hive/zunel/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Zunel is a Rust personal AI assistant with one supported runtime:
@@ -18,14 +18,14 @@ live under `~/.zunel`.
 
 ```bash
 # macOS / Linux — Homebrew
-brew tap rdu16625/tap && brew install zunel
+brew tap zunel-hive/tap && brew install zunel
 
 # Debian / Ubuntu — pre-built .deb
 ARCH=$(dpkg --print-architecture)
-TAG=$(curl -sL https://api.github.com/repos/rdu16625/zunel/releases/latest \
+TAG=$(curl -sL https://api.github.com/repos/zunel-hive/zunel/releases/latest \
         | grep -o '"tag_name":[^,]*' | head -n1 | cut -d'"' -f4)
 curl -fsSL -o /tmp/zunel.deb \
-  "https://github.com/rdu16625/zunel/releases/download/${TAG}/zunel-${ARCH}.deb"
+  "https://github.com/zunel-hive/zunel/releases/download/${TAG}/zunel-${ARCH}.deb"
 sudo dpkg -i /tmp/zunel.deb
 
 # Any platform with a Rust toolchain

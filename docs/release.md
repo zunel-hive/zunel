@@ -45,19 +45,19 @@ These steps live outside this repo and have to be done by the
 maintainer with a GitHub session.
 
 1. **Create the personal Homebrew tap repo.** On GitHub, create an
-   empty public repo named **`rdu16625/homebrew-tap`** (the
+   empty public repo named **`zunel-hive/homebrew-tap`** (the
    `homebrew-` prefix is mandatory — Homebrew matches it when a user
-   runs `brew tap rdu16625/tap`). No README needed; cargo-dist will
+   runs `brew tap zunel-hive/tap`). No README needed; cargo-dist will
    commit `Formula/zunel.rb` on the first release. The tap name is
    already pinned in `rust/Cargo.toml → [workspace.metadata.dist].tap`.
 
 2. **Mint a fine-grained PAT scoped to the tap repo.** GitHub →
    Settings → Developer settings → Personal access tokens → Fine-
    grained tokens → Generate new token. Limit it to the
-   `rdu16625/homebrew-tap` repository, grant **Contents: Read and
+   `zunel-hive/homebrew-tap` repository, grant **Contents: Read and
    write**, leave everything else alone.
 
-3. **Add the PAT as a repo secret on `rdu16625/zunel`.** Settings →
+3. **Add the PAT as a repo secret on `zunel-hive/zunel`.** Settings →
    Secrets and variables → Actions → New repository secret →
    `HOMEBREW_TAP_TOKEN` = the PAT minted above. The release workflow
    references this secret name verbatim at `release.yml:297`.
@@ -98,7 +98,7 @@ GitHub Actions then:
    builds the four per-target tarballs in parallel, computes SHA256s,
    creates a GitHub Release, uploads the tarballs.
 2. `release.yml > publish-homebrew-formula` clones
-   `rdu16625/homebrew-tap` (using `HOMEBREW_TAP_TOKEN`), drops a fresh
+   `zunel-hive/homebrew-tap` (using `HOMEBREW_TAP_TOKEN`), drops a fresh
    `Formula/zunel.rb` referencing the new tarballs, commits, pushes.
 3. `release.yml > announce` finalizes the GitHub Release.
 4. The release-published event triggers `deb.yml`, which builds and
@@ -205,8 +205,8 @@ remaining work is:
 
 1. Mint a GPG signing key for the apt repo. Store the private key as a
    GitHub Actions secret (`APT_REPO_SIGNING_KEY`).
-2. Reserve the GH-Pages branch on `rdu16625/zunel` (or a separate
-   `rdu16625/apt` repo) for the static apt index.
+2. Reserve the GH-Pages branch on `zunel-hive/zunel` (or a separate
+   `zunel-hive/apt` repo) for the static apt index.
 3. Extend `deb.yml` with a final job that, after both arch builds
    succeed, clones the apt-repo branch, drops the new `.deb`s into
    `pool/main/z/zunel/`, regenerates `Packages.gz` / `Release`
@@ -215,9 +215,9 @@ remaining work is:
 4. Document the user-side setup in `docs/quick-start.md`:
 
    ```bash
-   curl -fsSL https://rdu16625.github.io/apt/zunel-archive-keyring.gpg \
+   curl -fsSL https://zunel-hive.github.io/apt/zunel-archive-keyring.gpg \
      | sudo gpg --dearmor -o /etc/apt/keyrings/zunel.gpg
-   echo "deb [signed-by=/etc/apt/keyrings/zunel.gpg] https://rdu16625.github.io/apt stable main" \
+   echo "deb [signed-by=/etc/apt/keyrings/zunel.gpg] https://zunel-hive.github.io/apt stable main" \
      | sudo tee /etc/apt/sources.list.d/zunel.list
    sudo apt update && sudo apt install zunel
    ```

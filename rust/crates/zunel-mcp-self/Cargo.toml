@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Built-in self-inspection MCP server for Zunel."
-homepage = "https://github.com/rdu16625/zunel"
+homepage = "https://github.com/zunel-hive/zunel"
 
 [lib]
 name = "zunel_mcp_self"

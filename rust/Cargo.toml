@@ -25,8 +25,8 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"
-repository = "https://github.com/rdu16625/zunel"
-homepage = "https://github.com/rdu16625/zunel"
+repository = "https://github.com/zunel-hive/zunel"
+homepage = "https://github.com/zunel-hive/zunel"
 description = "Rust personal AI assistant with CLI, Slack gateway, and MCP tools."
 authors = ["zunel contributors"]
 
@@ -149,8 +149,8 @@ allow-dirty = ["ci"]
 # Personal Homebrew tap to publish the auto-generated formula into. cargo-dist
 # pushes `Formula/zunel.rb` (referencing the per-target tarballs uploaded to
 # the GitHub Release) on every successful tag build, so users on macOS/Linux
-# can install with `brew tap rdu16625/tap && brew install zunel`. Requires a
+# can install with `brew tap zunel-hive/tap && brew install zunel`. Requires a
 # `HOMEBREW_TAP_TOKEN` GitHub Actions secret on the source repo: a fine-
 # grained PAT with `contents:write` on the tap repo.
-tap = "rdu16625/homebrew-tap"
+tap = "zunel-hive/homebrew-tap"
 publish-jobs = ["homebrew"]

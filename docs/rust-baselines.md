@@ -3,7 +3,7 @@
 > **Historical:** This document captures the Rust-vs-Python parity
 > measurements taken while the Rust workspace was being grown from
 > `slice 1` to `slice 4`. The Python runtime was retired in
-> commit [`e7479e4`](https://github.com/rdu16625/zunel/commit/e7479e4),
+> commit [`e7479e4`](https://github.com/zunel-hive/zunel/commit/e7479e4),
 > so the Python baseline rows are no longer reproducible against the
 > current tree. The numbers are kept here for posterity (so future
 > performance regressions can be compared against the original
