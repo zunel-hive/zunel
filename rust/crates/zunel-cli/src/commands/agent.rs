@@ -1,0 +1,114 @@
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use tokio::sync::mpsc;
+use zunel_core::{
+    build_default_registry, build_default_registry_async, AgentLoop, ApprovalHandler,
+    ApprovalScope, RuntimeSelfStateProvider, SessionManager, SubagentManager,
+};
+use zunel_tools::{self_tool::SelfTool, spawn::SpawnTool};
+
+use crate::approval_cli::StdinApprovalHandler;
+use crate::cli::AgentArgs;
+use crate::renderer::StreamingRenderer;
+use crate::repl::{run_repl, ReplConfig};
+
+pub async fn run(args: AgentArgs, config_path: Option<&Path>) -> Result<()> {
+    let cfg = zunel_config::load_config(config_path).with_context(|| "loading zunel config")?;
+    let workspace = zunel_config::workspace_path(&cfg.agents.defaults)
+        .with_context(|| "resolving workspace path")?;
+    zunel_config::guard_workspace(&workspace).with_context(|| "validating workspace path")?;
+    zunel_util::ensure_dir(&workspace)
+        .with_context(|| format!("creating workspace dir {}", workspace.display()))?;
+
+    let provider = zunel_providers::build_provider(&cfg).with_context(|| "building provider")?;
+    let sessions = SessionManager::new(&workspace);
+    let mut registry = build_default_registry_async(&cfg, &workspace).await;
+    let child_tools = build_default_registry(&cfg, &workspace);
+    let subagents = Arc::new(
+        SubagentManager::new(
+            provider.clone(),
+            workspace.clone(),
+            cfg.agents.defaults.model.clone(),
+        )
+        .with_child_tools(child_tools),
+    );
+    registry.register(Arc::new(SpawnTool::new(subagents.clone())));
+    let mut tool_names: Vec<String> = registry.names().map(str::to_string).collect();
+    tool_names.push("self".into());
+    registry.register(Arc::new(SelfTool::from_provider(Arc::new(
+        RuntimeSelfStateProvider {
+            model: cfg.agents.defaults.model.clone(),
+            provider: cfg
+                .agents
+                .defaults
+                .provider
+                .clone()
+                .unwrap_or_else(|| "custom".into()),
+            workspace: workspace.display().to_string(),
+            max_iterations: 15,
+            tools: tool_names,
+            subagents,
+        },
+    ))));
+    let mut builder =
+        AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions.clone())
+            .with_tools(registry)
+            .with_workspace(workspace.clone())
+            .with_approval_required(cfg.tools.approval_required)
+            .with_approval_scope(parse_approval_scope(&cfg.tools.approval_scope));
+    if cfg.tools.approval_required {
+        let handler: Arc<dyn ApprovalHandler> = Arc::new(StdinApprovalHandler::new());
+        builder = builder.with_approval(handler);
+    }
+    let agent_loop = Arc::new(builder);
+
+    let show_footer = args.show_tokens || cfg.cli.show_token_footer;
+    match args.message {
+        Some(msg) => run_once(agent_loop.as_ref(), &args.session, &msg, show_footer).await,
+        None => {
+            let repl_cfg = ReplConfig {
+                session_key: args.session.clone(),
+                model_label: cfg.agents.defaults.model.clone(),
+                show_token_footer: show_footer,
+            };
+            run_repl(agent_loop, Arc::new(sessions), repl_cfg).await
+        }
+    }
+}
+
+fn parse_approval_scope(s: &str) -> ApprovalScope {
+    match s.to_ascii_lowercase().as_str() {
+        "shell" => ApprovalScope::Shell,
+        "writes" | "write" => ApprovalScope::Writes,
+        // "all", empty string, "none", anything else collapses to All;
+        // gating happens at `approval_required = false` for the off case.
+        _ => ApprovalScope::All,
+    }
+}
+
+async fn run_once(
+    agent_loop: &AgentLoop,
+    session_key: &str,
+    message: &str,
+    show_footer: bool,
+) -> Result<()> {
+    let (tx, rx) = mpsc::channel(64);
+    let renderer = StreamingRenderer::start();
+    let render_task = tokio::spawn(async move { renderer.drive(rx).await });
+    let result = agent_loop
+        .process_streamed(session_key, message, tx)
+        .await
+        .with_context(|| "running agent")?;
+    render_task
+        .await
+        .map_err(|e| anyhow::anyhow!("render task failed: {e}"))??;
+    if show_footer {
+        let footer = zunel_core::format_footer(&result.usage, &result.session_total_usage);
+        if !footer.is_empty() {
+            println!("{footer}");
+        }
+    }
+    Ok(())
+}
