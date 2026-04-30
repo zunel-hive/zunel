@@ -1,0 +1,140 @@
+name: Debian package
+
+# Fires after the cargo-dist `Release` workflow (defined in `release.yml`)
+# has finished publishing its tarballs and Homebrew formula to a GitHub
+# Release. This workflow:
+#   1. Downloads the per-arch musl tarballs cargo-dist already produced.
+#   2. Stages each binary at the path `cargo deb --target <triple>` looks
+#      for (`rust/target/<triple>/release/zunel`) and runs cargo-deb in
+#      `--no-build --no-strip` mode so we don't rebuild from source.
+#   3. Uploads the resulting `.deb`s back to the same GitHub Release as
+#      additional assets.
+#
+# The .debs are self-contained statically-linked musl binaries with no
+# `Depends:` beyond the auto-detected (essentially empty) shared-lib
+# set, so they install on Debian/Ubuntu via plain `dpkg -i`. A future
+# follow-up can publish them through a GH-Pages-hosted apt repo for the
+# real `apt install zunel` UX (see `docs/release.md`).
+
+on:
+  release:
+    types: [published]
+  # Manual trigger lets us iterate on the .deb metadata against an
+  # already-published release without cutting a new tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to repackage as .deb"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: x86_64-unknown-linux-musl
+            deb_arch: amd64
+          - triple: aarch64-unknown-linux-musl
+            deb_arch: arm64
+    env:
+      TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Pick Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # `cargo deb` only consults `[package.metadata.deb]` and the
+          # already-built binary; no actual compilation happens here, so
+          # `stable` is sufficient and avoids dragging in the project's
+          # pinned toolchain just to read the manifest.
+          toolchain: stable
+          targets: ${{ matrix.triple }}
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked --version ^2
+
+      - name: Download release tarball
+        run: |
+          set -euo pipefail
+          mkdir -p dist-download
+          cd dist-download
+          # cargo-dist publishes one tarball per target with the binary
+          # at `<crate>-<triple>/<binname>` inside. Glob via `gh` to
+          # tolerate either `tar.xz` or `tar.gz` depending on dist
+          # defaults; only one will exist.
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern "*${{ matrix.triple }}.tar.*" \
+            --pattern "*${{ matrix.triple }}.zip"
+          ls -la
+
+      - name: Stage binary at cargo-deb expected path
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # `[package.metadata.deb].assets` declares the binary at
+          # `../../target/release/zunel` relative to the zunel-cli
+          # manifest, i.e. `rust/target/release/zunel` from the repo
+          # root. cargo-deb cannot rewrite that path for `--target`
+          # because it doesn't start literally with `target/release/`,
+          # so we just stage the binary at that literal location for
+          # every matrix arch and let `--target` carry the arch label
+          # into the .deb metadata.
+          STAGE="rust/target/release"
+          mkdir -p "$STAGE"
+          # Extract whichever archive type cargo-dist produced and copy
+          # `zunel` out of the top-level `<crate>-<triple>/` directory.
+          for arc in dist-download/*.tar.* dist-download/*.zip; do
+            case "$arc" in
+              *.tar.*)
+                tar -xvf "$arc" -C dist-download
+                ;;
+              *.zip)
+                unzip -o "$arc" -d dist-download
+                ;;
+            esac
+          done
+          BIN=$(find dist-download -type f -name zunel -perm -u+x | head -n1)
+          if [ -z "$BIN" ]; then
+            echo "no extracted zunel binary found under dist-download/"
+            find dist-download -maxdepth 3 -print
+            exit 1
+          fi
+          cp -v "$BIN" "$STAGE/zunel"
+          chmod +x "$STAGE/zunel"
+
+      - name: Build .deb
+        working-directory: rust/crates/zunel-cli
+        run: |
+          set -euo pipefail
+          cargo deb --no-build --no-strip --target "${{ matrix.triple }}" --output ../../target/zunel-${{ matrix.deb_arch }}.deb
+          ls -la ../../target/zunel-${{ matrix.deb_arch }}.deb
+
+      - name: Sanity-check .deb contents
+        run: |
+          set -euo pipefail
+          DEB="rust/target/zunel-${{ matrix.deb_arch }}.deb"
+          dpkg-deb --info "$DEB"
+          dpkg-deb --contents "$DEB" | head -40
+          # The binary must land in /usr/bin/zunel; the docs must land
+          # under /usr/share/doc/zunel/. Fail loudly if either is
+          # missing.
+          dpkg-deb --contents "$DEB" | grep -q "./usr/bin/zunel"
+          dpkg-deb --contents "$DEB" | grep -q "./usr/share/doc/zunel/copyright"
+
+      - name: Upload .deb to release
+        if: ${{ github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
+        run: |
+          gh release upload "$TAG" \
+            "rust/target/zunel-${{ matrix.deb_arch }}.deb" \
+            --repo "${{ github.repository }}" \
+            --clobber
