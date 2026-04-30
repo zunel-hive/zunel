@@ -25,8 +25,8 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"
-repository = "https://github.com/zunel-hive/zunel"
-homepage = "https://github.com/zunel-hive/zunel"
+repository = "https://github.com/zunel-hive/zunel-binaries"
+homepage = "https://github.com/zunel-hive/zunel-binaries"
 description = "Rust personal AI assistant with CLI, Slack gateway, and MCP tools."
 authors = ["zunel contributors"]
 

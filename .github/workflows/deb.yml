@@ -59,7 +59,13 @@ jobs:
       # the upstream Release workflow — for tag pushes that's the tag
       # name (e.g., "v0.2.0"), exactly what `gh release` wants below.
       TAG: ${{ github.event.workflow_run.head_branch || github.event.inputs.tag }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # All `gh release` calls below target `zunel-hive/zunel-binaries`
+      # (the public binary host), not the source repo we're running in.
+      # Using `BINARIES_TOKEN` (fine-grained PAT scoped to that repo
+      # with Contents: Read+Write) keeps cross-repo access explicit and
+      # least-privilege; the default `GITHUB_TOKEN` is repo-scoped to
+      # the source side and can't write to the binaries repo.
+      GH_TOKEN: ${{ secrets.BINARIES_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,7 +95,7 @@ jobs:
           # pull down `.tar.xz.sha256` checksum files (which the
           # extraction step below would then try to feed into `tar`).
           gh release download "$TAG" \
-            --repo "${{ github.repository }}" \
+            --repo zunel-hive/zunel-binaries \
             --pattern "*${{ matrix.triple }}.tar.xz" \
             --pattern "*${{ matrix.triple }}.tar.gz" \
             --pattern "*${{ matrix.triple }}.tar.zst" \
@@ -155,5 +161,5 @@ jobs:
         run: |
           gh release upload "$TAG" \
             "rust/target/zunel-${{ matrix.deb_arch }}.deb" \
-            --repo "${{ github.repository }}" \
+            --repo zunel-hive/zunel-binaries \
             --clobber

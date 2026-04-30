@@ -15,9 +15,10 @@ brew install zunel
 
 The tap repo at `github.com/zunel-hive/homebrew-tap` is auto-updated by the
 release pipeline (`.github/workflows/release.yml`) on every `vN.N.N` tag.
-The formula points at the per-arch tarballs published to the GitHub
-Release, so `brew install` downloads a pre-built binary instead of
-compiling from source.
+The formula points at the per-arch tarballs published as a GitHub
+Release on `github.com/zunel-hive/zunel-binaries` (the public binary
+host paired with this source repo), so `brew install` downloads a
+pre-built binary instead of compiling from source.
 
 ### Debian / Ubuntu — `.deb`
 
@@ -28,10 +29,10 @@ plain `dpkg`:
 
 ```bash
 ARCH=$(dpkg --print-architecture)               # amd64 or arm64
-TAG=$(curl -sL https://api.github.com/repos/zunel-hive/zunel/releases/latest \
+TAG=$(curl -sL https://api.github.com/repos/zunel-hive/zunel-binaries/releases/latest \
         | grep -o '"tag_name":\s*"[^"]*"' | head -n1 | cut -d'"' -f4)
 curl -fsSL -o /tmp/zunel.deb \
-  "https://github.com/zunel-hive/zunel/releases/download/${TAG}/zunel-${ARCH}.deb"
+  "https://github.com/zunel-hive/zunel-binaries/releases/download/${TAG}/zunel-${ARCH}.deb"
 sudo dpkg -i /tmp/zunel.deb
 ```
 
