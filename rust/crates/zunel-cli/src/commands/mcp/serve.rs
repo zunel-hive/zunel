@@ -169,6 +169,27 @@ fn tools_for(server: &str) -> Vec<Value> {
                     "required": ["channel", "channel_id", "text"]
                 }
             }),
+            json!({
+                "name": "mcp_login_start",
+                "description": "Start an OAuth login flow for a remote MCP server. Returns the authorize URL the user should open in their browser; after they approve, they paste the redirect URL back into chat and the agent calls `mcp_login_complete`. Use this for `log me into <server>`, `reauth <server>`, or after an MCP tool call returns an error starting with `MCP_AUTH_REQUIRED:`. Side effect: writes `~/.zunel/mcp-oauth/<server>/pending.json` (10-min TTL).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"server": {"type": "string"}},
+                    "required": ["server"]
+                }
+            }),
+            json!({
+                "name": "mcp_login_complete",
+                "description": "Finish an OAuth login flow started by `mcp_login_start`. Pass the full redirect URL the IdP sent the user back to (or just the `?code=...&state=...` query string). Side effect: writes `~/.zunel/mcp-oauth/<server>/token.json` and removes the pending file on success.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "server": {"type": "string"},
+                        "callback_url": {"type": "string"}
+                    },
+                    "required": ["server", "callback_url"]
+                }
+            }),
             zunel_mcp_slack::capability_tool_descriptor(),
         ],
     }
@@ -218,6 +239,12 @@ async fn call_tool_with_args(server: &str, name: &str, args: &Value) -> String {
                 .unwrap_or_else(|err| err.to_string())
         }
         (_, "zunel_slack_capability" | "slack_capability") => zunel_mcp_slack::capability_report(),
+        (_, "mcp_login_start") => tools::mcp_login_start(args)
+            .await
+            .unwrap_or_else(|err| err.to_string()),
+        (_, "mcp_login_complete") => tools::mcp_login_complete(args)
+            .await
+            .unwrap_or_else(|err| err.to_string()),
         _ => call_tool(server, name).await,
     }
 }

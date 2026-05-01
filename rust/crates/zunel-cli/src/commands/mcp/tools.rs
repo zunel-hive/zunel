@@ -163,6 +163,71 @@ pub(super) fn cron_job_get(args: &Value) -> Result<String> {
     Ok(serde_json::to_string(&job)?)
 }
 
+/// Start the chat-driven OAuth flow for a remote MCP server. Mirrors
+/// the `mcp_login_start` handler in [`zunel_mcp_self::handlers`] so the
+/// surface stays identical between the standalone `zunel-mcp-self`
+/// binary and the unified `zunel mcp serve --server self` path.
+pub(super) async fn mcp_login_start(args: &Value) -> Result<String> {
+    let server = args
+        .get("server")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("server is required"))?;
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let home = zunel_config::zunel_home().context("resolving zunel home directory")?;
+    let started = zunel_mcp::oauth::start_flow(&home, &cfg, server, None)
+        .await
+        .with_context(|| format!("starting OAuth flow for '{server}'"))?;
+    let instructions = format!(
+        "Open the URL above in your browser. After you approve in your browser, the page \
+         will show the redirect URL (or your browser will land on a `127.0.0.1` page). Copy \
+         that full URL and paste it back to me as your next message — I'll finish the login \
+         by calling `mcp_login_complete`. The pending login expires in {} minutes.",
+        started.expires_in / 60
+    );
+    Ok(serde_json::to_string(&json!({
+        "ok": true,
+        "server": started.server,
+        "authorize_url": started.authorize_url,
+        "redirect_uri": started.redirect_uri,
+        "expires_in": started.expires_in,
+        "instructions": instructions,
+    }))?)
+}
+
+/// Finish the chat-driven OAuth flow by exchanging the pasted redirect
+/// URL for an access token. Returns `{ok: true, ...}` on success or
+/// `{ok: false, error: "..."}` on any failure path so the agent doesn't
+/// have to special-case error variants.
+pub(super) async fn mcp_login_complete(args: &Value) -> Result<String> {
+    let server = args
+        .get("server")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("server is required"))?;
+    let callback_url = args
+        .get("callback_url")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("callback_url is required"))?;
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let home = zunel_config::zunel_home().context("resolving zunel home directory")?;
+    match zunel_mcp::oauth::complete_flow(&home, &cfg, server, callback_url).await {
+        Ok(completed) => Ok(serde_json::to_string(&json!({
+            "ok": true,
+            "server": completed.server,
+            "scopes": completed.scopes,
+            "expires_in": completed.expires_in,
+            "token_path": completed.token_path.display().to_string(),
+        }))?),
+        Err(err) => Ok(serde_json::to_string(&json!({
+            "ok": false,
+            "server": server,
+            "error": err.to_string(),
+        }))?),
+    }
+}
+
 pub(super) async fn send_message_to_channel(args: &Value) -> Result<String> {
     let channel = required_str(args, "channel")?;
     if channel != "slack" {

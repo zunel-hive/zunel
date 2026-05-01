@@ -31,6 +31,37 @@ async fn cli_mcp_serve_self_exposes_self_status_tool() {
 }
 
 #[tokio::test]
+async fn cli_mcp_serve_self_exposes_chat_oauth_login_tools() {
+    // Regression: v0.2.6 shipped the `mcp_login_start` / `mcp_login_complete`
+    // self-MCP handlers in zunel-mcp-self::handlers but forgot to plumb them
+    // through zunel-cli's parallel serve.rs/tools.rs surface. The bundled
+    // `zunel mcp serve --server self` is the path users actually configure
+    // in `~/.zunel/config.json`, so this test pins both surfaces together.
+    let bin = cargo_bin("zunel");
+    let args = vec![
+        "mcp".to_string(),
+        "serve".to_string(),
+        "--server".to_string(),
+        "self".to_string(),
+    ];
+    let mut client =
+        StdioMcpClient::connect(bin.to_string_lossy().as_ref(), &args, BTreeMap::new(), 5)
+            .await
+            .unwrap();
+
+    let tools = client.list_tools(5).await.unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(
+        names.contains(&"mcp_login_start"),
+        "expected mcp_login_start to be exposed by `zunel mcp serve --server self`; got {names:?}"
+    );
+    assert!(
+        names.contains(&"mcp_login_complete"),
+        "expected mcp_login_complete to be exposed by `zunel mcp serve --server self`; got {names:?}"
+    );
+}
+
+#[tokio::test]
 async fn cli_mcp_login_caches_remote_oauth_token() {
     let home = tempfile::tempdir().unwrap();
     let auth = MockServer::start().await;
