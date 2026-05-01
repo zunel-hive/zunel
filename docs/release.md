@@ -250,7 +250,11 @@ diff -U2 /tmp/release.yml.handpatched .github/workflows/release.yml
 #    exists) and lands the block right before the formula's class-
 #    closing `end`. The resulting service runs `zunel gateway` with
 #    `keep_alive true`, logs to `var/log/zunel-gateway.{out,err}.log`,
-#    and sets `RUST_LOG=info,zunel=info`.
+#    and sets `RUST_LOG=info,zunel=info` plus a canonical macOS `PATH`
+#    (`/opt/homebrew/bin:...:/usr/sbin:/sbin`) so the agent's ExecTool
+#    can resolve brew-installed binaries when driven via Slack — macOS
+#    launchd otherwise hands brew-services jobs a stripped PATH that
+#    only contains `/usr/bin:/bin:/usr/sbin:/sbin`.
 #
 #    Note: this is for *public* users. The maintainer's own machine
 #    (`run-gateway.sh` LaunchAgent) is independent and richer (it

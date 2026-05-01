@@ -406,13 +406,24 @@ jobs:
           if "service do" in src:
               print(f"formula at {p} already has a service block; skipping injection")
               sys.exit(0)
+          # `PATH` is injected because macOS launchd starts brew-services
+          # jobs with a stripped PATH (`/usr/bin:/bin:/usr/sbin:/sbin`).
+          # That PATH propagates to every shell command the agent runs via
+          # the gateway's ExecTool, so a Slack-driven `git`, `gh`, `jq`,
+          # `node`, `psql`, etc. would fail to resolve a brew-installed
+          # binary out-of-the-box. The list below covers Apple Silicon
+          # (`/opt/homebrew/...`) and Intel macOS (`/usr/local/...`)
+          # brew prefixes, plus the standard system path. Linux .deb /
+          # systemd users get a sane PATH from systemd's defaults and are
+          # unaffected. Documented in docs/configuration.md > Env vars.
           service_block = """
             service do
               run [opt_bin/"zunel", "gateway"]
               keep_alive true
               log_path var/"log/zunel-gateway.out.log"
               error_log_path var/"log/zunel-gateway.err.log"
-              environment_variables RUST_LOG: "info,zunel=info"
+              environment_variables RUST_LOG: "info,zunel=info",
+                                    PATH: "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
             end
           """
           lines = src.splitlines(keepends=True)

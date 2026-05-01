@@ -183,6 +183,30 @@ brew services stop zunel-hive/tap/zunel
 tail -f /opt/homebrew/var/log/zunel-gateway.{out,err}.log
 ```
 
+The Homebrew formula sets two `EnvironmentVariables` for the gateway:
+
+| Var       | Value                                                                                       | Why                                                                                                           |
+| --------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `RUST_LOG`| `info,zunel=info`                                                                           | Enable info-level tracing for the gateway loops.                                                              |
+| `PATH`    | `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin` | macOS launchd starts brew-services jobs with a stripped PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) that the agent's `ExecTool` would otherwise inherit. Pre-seeding the canonical brew + system prefixes lets the agent invoke `brew`-installed binaries (`git`, `gh`, `jq`, `node`, `psql`, `kubectl`, …) when driven via Slack. Both Apple Silicon (`/opt/homebrew/...`) and Intel (`/usr/local/...`) prefixes are included so the same formula serves both. |
+
+To extend (e.g. add `~/.cargo/bin` for cargo-installed tooling), edit the
+local plist and reload — but note that `brew upgrade` / `brew services
+restart` regenerates the plist from the formula and overwrites manual
+edits:
+
+```bash
+plutil -insert EnvironmentVariables.PATH \
+  -string "$HOME/.cargo/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  ~/Library/LaunchAgents/homebrew.mxcl.zunel.plist
+launchctl bootout gui/$UID/homebrew.mxcl.zunel
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/homebrew.mxcl.zunel.plist
+```
+
+The persistent path is to bake new env vars into the formula via
+`.github/workflows/release.yml` (search `service_block = """`) and
+ship them in the next release; that survives upgrades for everyone.
+
 ### Slack bot token rotation: handled in-runtime
 
 If you've enabled bot-token rotation on your Slack app
