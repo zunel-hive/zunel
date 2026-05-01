@@ -64,13 +64,25 @@ async fn register_mcp_tools(registry: &mut ToolRegistry, cfg: &Config) {
         let tool_timeout = server.tool_timeout.unwrap_or(30);
         let mut client: Box<dyn zunel_mcp::McpClient> = match mcp_transport(server) {
             McpTransport::Stdio => {
-                let Some(command) = server.command.as_deref() else {
+                let Some(command_raw) = server.command.as_deref() else {
                     tracing::warn!(server = %server_name, "skipping stdio MCP server without command");
                     continue;
                 };
+                let resolved_command = match resolve_stdio_command(command_raw) {
+                    Ok(cmd) => cmd,
+                    Err(err) => {
+                        tracing::warn!(
+                            server = %server_name,
+                            command = command_raw,
+                            error = %err,
+                            "failed to resolve stdio MCP command"
+                        );
+                        continue;
+                    }
+                };
                 let args = server.args.clone().unwrap_or_default();
                 let env = server.env.clone().unwrap_or_default();
-                match StdioMcpClient::connect(command, &args, env, init_timeout).await {
+                match StdioMcpClient::connect(&resolved_command, &args, env, init_timeout).await {
                     Ok(client) => Box::new(client),
                     Err(err) => {
                         tracing::warn!(server = %server_name, error = %err, "failed to initialize MCP server");
@@ -127,6 +139,51 @@ async fn register_mcp_tools(registry: &mut ToolRegistry, cfg: &Config) {
             )));
         }
     }
+}
+
+/// Resolve the `command` field of a stdio MCP server entry.
+///
+/// Most values are passed through verbatim and ultimately fed to
+/// `Command::new`, which performs PATH lookup for bare names and
+/// uses the literal argument for absolute/relative paths.
+///
+/// The single sentinel value `"self"` is special-cased: it expands
+/// to the absolute path of the *currently running* zunel binary
+/// (via [`std::env::current_exe`]). This lets users wire the
+/// built-in `zunel mcp serve --server slack|self` MCP servers into
+/// their config without hardcoding a Homebrew/cargo/install prefix:
+///
+/// ```json
+/// {
+///   "tools": {
+///     "mcpServers": {
+///       "slack_me": {
+///         "type": "stdio",
+///         "command": "self",
+///         "args": ["mcp", "serve", "--server", "slack"]
+///       }
+///     }
+///   }
+/// }
+/// ```
+///
+/// The motivating environment is `brew services start zunel`
+/// (macOS launchd): brew's mxcl plist does not propagate
+/// `/opt/homebrew/bin` to the gateway's `PATH`, so a bare
+/// `"command": "zunel"` would fail to spawn. Resolving via
+/// `current_exe()` is prefix-agnostic and works for cargo
+/// installs, .deb installs, and direct binary drops as well.
+fn resolve_stdio_command(command: &str) -> std::io::Result<String> {
+    if command != "self" {
+        return Ok(command.to_string());
+    }
+    let exe = std::env::current_exe()?;
+    exe.to_str().map(ToOwned::to_owned).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("current_exe path is not valid UTF-8: {}", exe.display()),
+        )
+    })
 }
 
 fn valid_tool_name(name: &str) -> bool {
@@ -415,6 +472,33 @@ mod tests {
             authorization_url: "https://example.test/authorize".into(),
             token_url: "https://example.test/token".into(),
         }
+    }
+
+    #[test]
+    fn resolve_stdio_command_passes_through_non_sentinel_values() {
+        assert_eq!(resolve_stdio_command("zunel").unwrap(), "zunel".to_string());
+        assert_eq!(
+            resolve_stdio_command("/opt/homebrew/bin/zunel").unwrap(),
+            "/opt/homebrew/bin/zunel".to_string()
+        );
+        // Empty string is not the sentinel and is returned as-is so the
+        // downstream warning surfaces the real misconfiguration instead
+        // of getting swallowed by current_exe() success.
+        assert_eq!(resolve_stdio_command("").unwrap(), "".to_string());
+    }
+
+    #[test]
+    fn resolve_stdio_command_self_sentinel_expands_to_current_exe() {
+        let resolved = resolve_stdio_command("self").expect("current_exe must succeed in tests");
+        let expected = std::env::current_exe()
+            .expect("current_exe in tests")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(resolved, expected);
+        assert!(
+            std::path::Path::new(&resolved).is_absolute(),
+            "expected absolute path from current_exe, got {resolved}"
+        );
     }
 
     #[test]

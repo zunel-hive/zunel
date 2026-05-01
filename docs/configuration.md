@@ -948,8 +948,8 @@ also vend user tokens. Set up a second app at `~/.zunel/slack-app-mcp/`:
        "mcpServers": {
          "slack_me": {
            "type": "stdio",
-          "command": "zunel",
-          "args": ["mcp", "serve", "--server", "slack"],
+           "command": "self",
+           "args": ["mcp", "serve", "--server", "slack"],
            "initTimeout": 15,
            "toolTimeout": 30
          }
@@ -958,8 +958,22 @@ also vend user tokens. Set up a second app at `~/.zunel/slack-app-mcp/`:
    }
    ```
 
-Use the installed `zunel` binary. Restart `zunel gateway` and the tools show
-   up as `mcp_slack_me_whoami`, `mcp_slack_me_channel_history`,
+   The literal string `"self"` is a zunel-specific sentinel that resolves
+   to the absolute path of the running `zunel` binary (via
+   `std::env::current_exe()`). This is the recommended form because it
+   works regardless of the install prefix and — critically — under
+   `brew services start zunel`, where macOS `launchd` does **not**
+   inherit `/opt/homebrew/bin` on `PATH`, so a bare `"command": "zunel"`
+   would fail to spawn the child MCP process.
+
+   You can still use an absolute path (`/opt/homebrew/bin/zunel`,
+   `/usr/local/bin/zunel`, `~/.cargo/bin/zunel`, …) or a bare name
+   (`"zunel"`) when the spawning environment has a propagated PATH —
+   e.g. running `zunel gateway` directly from a login shell. `"self"`
+   is the safe default everywhere.
+
+   Restart `zunel gateway` and the tools show up as
+   `mcp_slack_me_whoami`, `mcp_slack_me_channel_history`,
    `mcp_slack_me_search_messages`, `mcp_slack_me_post_as_me`,
    `mcp_slack_me_dm_self`, etc.
 
