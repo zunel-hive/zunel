@@ -2,7 +2,7 @@ use std::fs;
 
 use tempfile::tempdir;
 
-use zunel_skills::SkillsLoader;
+use zunel_skills::{SkillsLoader, EMBEDDED_BUILTIN_LABEL};
 
 fn write_skill(dir: &std::path::Path, name: &str, contents: &str) {
     let skill_dir = dir.join("skills").join(name);
@@ -18,7 +18,8 @@ fn lists_user_skills_from_workspace() {
         "greet",
         "---\ndescription: Says hi.\n---\n\nHello world.\n",
     );
-    let loader = SkillsLoader::new(tmp.path(), None, &[]);
+    // Disable embedded builtins so this test is purely about user skills.
+    let loader = SkillsLoader::new(tmp.path(), None, &["mcp-oauth-login".to_string()]);
     let skills = loader.list_skills(true).unwrap();
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "greet");
@@ -41,7 +42,11 @@ fn builtin_skills_are_loaded_after_user_skills_and_deduplicated() {
     );
     write_skill(builtin.path(), "wave", "---\ndescription: Wave.\n---\n\n");
 
-    let loader = SkillsLoader::new(ws.path(), Some(builtin.path()), &[]);
+    let loader = SkillsLoader::new(
+        ws.path(),
+        Some(builtin.path()),
+        &["mcp-oauth-login".to_string()],
+    );
     let skills = loader.list_skills(true).unwrap();
     let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, vec!["greet", "wave"]);
@@ -99,7 +104,11 @@ fn disabled_skills_are_omitted() {
     let tmp = tempdir().unwrap();
     write_skill(tmp.path(), "keep", "---\ndescription: K.\n---\n\n");
     write_skill(tmp.path(), "skip", "---\ndescription: S.\n---\n\n");
-    let loader = SkillsLoader::new(tmp.path(), None, &["skip".to_string()]);
+    let loader = SkillsLoader::new(
+        tmp.path(),
+        None,
+        &["skip".to_string(), "mcp-oauth-login".to_string()],
+    );
     let names: Vec<String> = loader
         .list_skills(true)
         .unwrap()
@@ -107,6 +116,69 @@ fn disabled_skills_are_omitted() {
         .map(|s| s.name)
         .collect();
     assert_eq!(names, vec!["keep".to_string()]);
+}
+
+#[test]
+fn embedded_builtin_mcp_oauth_login_is_visible() {
+    // The crate ships `builtins/mcp-oauth-login/SKILL.md`; with no user
+    // workspace skills, that builtin should appear in the listing and be
+    // reachable via `load_skill`.
+    let tmp = tempdir().unwrap();
+    let loader = SkillsLoader::new(tmp.path(), None, &[]);
+    let skills = loader.list_skills(false).unwrap();
+    let oauth = skills
+        .iter()
+        .find(|s| s.name == "mcp-oauth-login")
+        .expect("embedded mcp-oauth-login skill should be listed");
+    assert!(
+        oauth
+            .path
+            .display()
+            .to_string()
+            .contains(EMBEDDED_BUILTIN_LABEL),
+        "embedded skills should label themselves as builtin: {}",
+        oauth.path.display()
+    );
+    let body = loader
+        .load_skill("mcp-oauth-login")
+        .unwrap()
+        .expect("should resolve embedded skill body");
+    assert!(
+        body.contains("MCP_AUTH_REQUIRED:"),
+        "body must explain the contract"
+    );
+    assert!(
+        body.contains("mcp_login_start"),
+        "body must reference the tool"
+    );
+}
+
+#[test]
+fn user_skills_override_embedded_builtins_with_same_name() {
+    let ws = tempdir().unwrap();
+    write_skill(
+        ws.path(),
+        "mcp-oauth-login",
+        "---\ndescription: Custom override.\n---\n\nUser body.\n",
+    );
+    let loader = SkillsLoader::new(ws.path(), None, &[]);
+    let oauth = loader
+        .list_skills(true)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.name == "mcp-oauth-login")
+        .expect("user override should still be present");
+    assert_eq!(oauth.description, "Custom override.");
+    assert!(
+        !oauth
+            .path
+            .display()
+            .to_string()
+            .contains(EMBEDDED_BUILTIN_LABEL),
+        "user-overridden skill must point at the workspace path"
+    );
+    let body = loader.load_skill("mcp-oauth-login").unwrap().expect("body");
+    assert!(body.contains("User body."));
 }
 
 #[test]

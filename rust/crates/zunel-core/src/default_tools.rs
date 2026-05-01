@@ -12,7 +12,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use zunel_config::{Config, McpServerConfig, WebToolsConfig};
 use zunel_mcp::{
-    oauth as mcp_oauth_refresh, McpToolWrapper, RemoteMcpClient, RemoteTransport, StdioMcpClient,
+    oauth as mcp_oauth_refresh, AuthHeaderProvider, McpAuthRequiredTool, McpToolWrapper,
+    RemoteMcpClient, RemoteTransport, StdioMcpClient,
 };
 use zunel_tools::{
     cron::CronTool,
@@ -96,11 +97,38 @@ async fn register_mcp_tools(registry: &mut ToolRegistry, cfg: &Config) {
                     tracing::warn!(server = %server_name, "skipping remote MCP server without url");
                     continue;
                 };
-                let headers = remote_headers_with_cached_oauth(server_name, server).await;
-                match RemoteMcpClient::connect(url, headers, transport, init_timeout).await {
+                let mcp_oauth_state = remote_oauth_state(server_name, server).await;
+                if mcp_oauth_state.needs_login() {
+                    // OAuth-enabled, but the cached token can't be
+                    // brought back to life unattended. Register an
+                    // AUTH_REQUIRED stub so the agent has something
+                    // to call and the chat-driven login skill kicks
+                    // in instead of the server silently disappearing.
+                    register_auth_required_stub(
+                        registry,
+                        server_name,
+                        mcp_oauth_state.reason_tag(),
+                    );
+                    continue;
+                }
+                let headers = mcp_oauth_state.static_headers.clone();
+                let auth_provider = mcp_oauth_state.auth_provider.clone();
+                let oauth_enabled = mcp_oauth_state.oauth_enabled;
+                match RemoteMcpClient::connect_with_auth(
+                    url,
+                    headers,
+                    auth_provider,
+                    transport,
+                    init_timeout,
+                )
+                .await
+                {
                     Ok(client) => Box::new(client),
                     Err(err) => {
                         tracing::warn!(server = %server_name, error = %err, "failed to initialize MCP server");
+                        if oauth_enabled {
+                            register_auth_required_stub(registry, server_name, "connect_failed");
+                        }
                         continue;
                     }
                 }
@@ -114,6 +142,14 @@ async fn register_mcp_tools(registry: &mut ToolRegistry, cfg: &Config) {
             Ok(tools) => tools,
             Err(err) => {
                 tracing::warn!(server = %server_name, error = %err, "failed to list MCP tools");
+                if matches!(err, zunel_mcp::Error::Unauthorized { .. })
+                    && server
+                        .normalized_oauth()
+                        .map(|oauth| oauth.enabled)
+                        .unwrap_or(false)
+                {
+                    register_auth_required_stub(registry, server_name, "invalid_token");
+                }
                 continue;
             }
         };
@@ -140,6 +176,24 @@ async fn register_mcp_tools(registry: &mut ToolRegistry, cfg: &Config) {
             )));
         }
     }
+}
+
+fn register_auth_required_stub(registry: &mut ToolRegistry, server_name: &str, reason: &str) {
+    let wrapped_name = format!("mcp_{server_name}_login_required");
+    if !valid_tool_name(&wrapped_name) {
+        tracing::warn!(
+            server = %server_name,
+            wrapped = %wrapped_name,
+            "cannot register MCP auth-required stub with invalid tool name"
+        );
+        return;
+    }
+    tracing::warn!(
+        server = %server_name,
+        reason = %reason,
+        "registering MCP auth-required stub; chat-driven login skill will pick this up"
+    );
+    registry.register(Arc::new(McpAuthRequiredTool::new(server_name, reason)));
 }
 
 /// Resolve the `command` field of a stdio MCP server entry.
@@ -226,30 +280,135 @@ fn tool_enabled(server: &McpServerConfig, raw_name: &str, wrapped_name: &str) ->
         .any(|name| name == "*" || name == raw_name || name == wrapped_name)
 }
 
-async fn remote_headers_with_cached_oauth(
-    server_name: &str,
-    server: &McpServerConfig,
-) -> BTreeMap<String, String> {
+/// Snapshot of the OAuth bookkeeping for one remote MCP server, computed
+/// in `register_mcp_tools` before we attempt to connect. Lets us decide
+/// in one place whether to dial out at all (`needs_login()` ⇒ register
+/// an AUTH_REQUIRED stub instead) and what `Authorization` header to
+/// attach when we do.
+struct McpRemoteOauthState {
+    /// Operator-supplied headers (after `${VAR}` expansion). The
+    /// `Authorization` header is *not* in here when zunel owns the
+    /// OAuth lifecycle — that one comes from `auth_provider` below
+    /// so refreshes show up live in the gateway without a
+    /// reconnect.
+    static_headers: BTreeMap<String, String>,
+    oauth_enabled: bool,
+    /// Live re-read of `~/.zunel/mcp-oauth/<server>/token.json` per
+    /// outbound request. `None` when zunel doesn't own the bearer
+    /// header for this server (operator pinned `Authorization`, or
+    /// `zunel_home()` couldn't be resolved). When set, the
+    /// `RemoteMcpClient` consults it on every request so the
+    /// periodic refresh task's writes propagate immediately.
+    auth_provider: Option<AuthHeaderProvider>,
+    /// `Some` when zunel owns the bearer-header lifecycle for this
+    /// server (not operator-supplied `Authorization`). Used to drive
+    /// the auth-required stub decision: `Outcome::NotCached |
+    /// NoRefreshToken | NoTokenUrl | RefreshFailed` ⇒ chat-driven
+    /// re-login.
+    refresh_outcome: Option<mcp_oauth_refresh::Outcome>,
+}
+
+impl McpRemoteOauthState {
+    fn needs_login(&self) -> bool {
+        if !self.oauth_enabled {
+            return false;
+        }
+        match &self.refresh_outcome {
+            Some(outcome) => match outcome {
+                mcp_oauth_refresh::Outcome::NotCached
+                | mcp_oauth_refresh::Outcome::NoRefreshToken
+                | mcp_oauth_refresh::Outcome::NoTokenUrl
+                | mcp_oauth_refresh::Outcome::RefreshFailed(_) => true,
+                mcp_oauth_refresh::Outcome::StillFresh { .. }
+                | mcp_oauth_refresh::Outcome::Refreshed { .. }
+                | mcp_oauth_refresh::Outcome::NoExpiry => false,
+            },
+            None => false,
+        }
+    }
+
+    fn reason_tag(&self) -> &'static str {
+        match &self.refresh_outcome {
+            Some(mcp_oauth_refresh::Outcome::NotCached) => "not_cached",
+            Some(mcp_oauth_refresh::Outcome::NoRefreshToken) => "no_refresh_token",
+            Some(mcp_oauth_refresh::Outcome::NoTokenUrl) => "no_token_url",
+            Some(mcp_oauth_refresh::Outcome::RefreshFailed(_)) => "refresh_failed",
+            _ => "unknown",
+        }
+    }
+}
+
+async fn remote_oauth_state(server_name: &str, server: &McpServerConfig) -> McpRemoteOauthState {
     let raw = server.headers.clone().unwrap_or_default();
-    let mut headers = expand_header_envs(server_name, raw, &|name| std::env::var(name).ok());
-    if headers
+    let static_headers = expand_header_envs(server_name, raw, &|name| std::env::var(name).ok());
+    let oauth_enabled = server
+        .normalized_oauth()
+        .map(|oauth| oauth.enabled)
+        .unwrap_or(false);
+    if static_headers
         .keys()
         .any(|key| key.eq_ignore_ascii_case("authorization"))
     {
         // Operator-supplied `Authorization` header wins; don't
         // even read the cached OAuth token (and definitely don't
-        // try to refresh it).
-        return headers;
+        // try to refresh it). The chat-driven login skill is
+        // intentionally skipped here too — if the operator pinned
+        // a header, they own the rotation.
+        return McpRemoteOauthState {
+            static_headers,
+            oauth_enabled,
+            auth_provider: None,
+            refresh_outcome: None,
+        };
     }
     let Ok(home) = zunel_config::zunel_home() else {
-        return headers;
+        return McpRemoteOauthState {
+            static_headers,
+            oauth_enabled,
+            auth_provider: None,
+            refresh_outcome: None,
+        };
     };
-    log_oauth_refresh_outcome(
-        server_name,
-        mcp_oauth_refresh::refresh_if_needed(&home, server_name).await,
-    );
-    apply_cached_oauth_header(&mut headers, &home, server_name);
-    headers
+    let outcome = mcp_oauth_refresh::refresh_if_needed(&home, server_name).await;
+    log_oauth_refresh_outcome(server_name, &outcome);
+    let auth_provider = if oauth_enabled {
+        Some(make_oauth_auth_provider(&home, server_name))
+    } else {
+        None
+    };
+    McpRemoteOauthState {
+        static_headers,
+        oauth_enabled,
+        auth_provider,
+        refresh_outcome: Some(outcome),
+    }
+}
+
+/// Build a closure the `RemoteMcpClient` consults on every outbound
+/// request: read the cached token from disk, format
+/// `<TokenType> <accessToken>`, and return it as a `HeaderValue`.
+///
+/// Costs roughly one ~1KB file read per MCP call, which is dwarfed
+/// by the network round-trip. The win is that a refresh task that
+/// rewrites `token.json` propagates to in-flight `RemoteMcpClient`s
+/// on the next request — no reconnect, no tool re-registration.
+fn make_oauth_auth_provider(home: &Path, server_name: &str) -> AuthHeaderProvider {
+    let home = home.to_path_buf();
+    let server_name = server_name.to_string();
+    Arc::new(move || -> Option<zunel_mcp::HeaderValue> {
+        match zunel_config::mcp_oauth::load_token(&home, &server_name) {
+            Ok(Some(token)) => zunel_mcp::HeaderValue::from_str(&token.authorization_header()).ok(),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(
+                    server = %server_name,
+                    error = %err,
+                    "ignoring invalid MCP OAuth token cache while building Authorization header"
+                );
+                None
+            }
+        }
+    })
 }
 
 /// Surface the [`mcp_oauth_refresh::Outcome`] in `tracing` so the
@@ -257,21 +416,21 @@ async fn remote_headers_with_cached_oauth(
 /// to Jira anymore" failure mode is visible at info/warn instead
 /// of being inferred from a downstream 401 buried in
 /// `gateway.err.log`.
-fn log_oauth_refresh_outcome(server_name: &str, outcome: mcp_oauth_refresh::Outcome) {
+fn log_oauth_refresh_outcome(server_name: &str, outcome: &mcp_oauth_refresh::Outcome) {
     use mcp_oauth_refresh::Outcome::*;
     match outcome {
         NotCached | NoExpiry => {}
         StillFresh { secs_remaining } => {
             tracing::debug!(
                 server = server_name,
-                secs_remaining,
+                secs_remaining = *secs_remaining,
                 "MCP OAuth token still fresh"
             );
         }
         Refreshed { new_expires_in } => {
             tracing::info!(
                 server = server_name,
-                new_expires_in,
+                new_expires_in = ?new_expires_in,
                 "refreshed MCP OAuth access token via refresh_token grant"
             );
         }
@@ -279,7 +438,7 @@ fn log_oauth_refresh_outcome(server_name: &str, outcome: mcp_oauth_refresh::Outc
             tracing::warn!(
                 server = server_name,
                 "MCP OAuth access token expired and no refresh_token is cached; \
-                 run `zunel mcp login {server_name} --force` to re-authenticate",
+                 ask the agent to log you in (or run `zunel mcp login {server_name} --force`)",
                 server_name = server_name,
             );
         }
@@ -287,7 +446,7 @@ fn log_oauth_refresh_outcome(server_name: &str, outcome: mcp_oauth_refresh::Outc
             tracing::warn!(
                 server = server_name,
                 "MCP OAuth token cache is missing the tokenUrl needed to refresh; \
-                 run `zunel mcp login {server_name} --force`",
+                 ask the agent to log you in (or run `zunel mcp login {server_name} --force`)",
                 server_name = server_name,
             );
         }
@@ -420,26 +579,6 @@ fn valid_env_var_name(name: &str) -> bool {
     bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-fn apply_cached_oauth_header(
-    headers: &mut BTreeMap<String, String>,
-    home: &Path,
-    server_name: &str,
-) {
-    match zunel_config::mcp_oauth::load_token(home, server_name) {
-        Ok(Some(token)) => {
-            headers.insert("Authorization".to_string(), token.authorization_header());
-        }
-        Ok(None) => {}
-        Err(err) => {
-            tracing::warn!(
-                server = server_name,
-                error = %err,
-                "ignoring invalid MCP OAuth token cache"
-            );
-        }
-    }
-}
-
 fn build_search_provider(cfg: &WebToolsConfig) -> Box<dyn WebSearchProvider> {
     match cfg.search_provider.as_str() {
         "brave" => {
@@ -458,6 +597,7 @@ fn build_search_provider(cfg: &WebToolsConfig) -> Box<dyn WebSearchProvider> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use zunel_config::mcp_oauth::{save_token, CachedMcpOAuthToken};
 
     fn full_token(access_token: &str, token_type: Option<&str>) -> CachedMcpOAuthToken {
@@ -503,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_mcp_oauth_token_adds_authorization_header() {
+    fn oauth_auth_provider_reads_cached_token_per_call() {
         let home = tempfile::tempdir().unwrap();
         save_token(
             home.path(),
@@ -512,21 +652,28 @@ mod tests {
         )
         .unwrap();
 
-        let mut headers = BTreeMap::new();
-        apply_cached_oauth_header(&mut headers, home.path(), "remote");
+        let provider = make_oauth_auth_provider(home.path(), "remote");
+        let value = provider().expect("authorization header present");
+        assert_eq!(value, "Bearer token-1");
 
-        assert_eq!(
-            headers.get("Authorization").map(String::as_str),
-            Some("Bearer token-1")
-        );
+        // Live re-read: rewriting the cache reflects in the next call
+        // without re-creating the provider — this is the property the
+        // periodic refresh task relies on.
+        save_token(
+            home.path(),
+            "remote",
+            &full_token("token-2", Some("bearer")),
+        )
+        .unwrap();
+        let value = provider().expect("authorization header present after refresh");
+        assert_eq!(value, "Bearer token-2");
     }
 
     #[test]
-    fn missing_token_cache_leaves_headers_untouched() {
+    fn oauth_auth_provider_returns_none_when_token_cache_missing() {
         let home = tempfile::tempdir().unwrap();
-        let mut headers = BTreeMap::new();
-        apply_cached_oauth_header(&mut headers, home.path(), "never-logged-in");
-        assert!(headers.is_empty());
+        let provider = make_oauth_auth_provider(home.path(), "never-logged-in");
+        assert!(provider().is_none());
     }
 
     fn lookup_from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -672,5 +819,93 @@ mod tests {
         );
         assert_eq!(expanded.get("X-Static").map(String::as_str), Some("fixed"));
         assert!(!expanded.contains_key("X-Missing"));
+    }
+
+    /// OAuth-enabled remote MCP server with no cached token must
+    /// surface as an `mcp_<server>_login_required` stub in the
+    /// registry — that's the signal the chat-driven login skill
+    /// keys off (the alternative being a silent
+    /// "this MCP just disappeared from the registry" failure mode).
+    #[tokio::test]
+    async fn registers_auth_required_stub_when_oauth_token_not_cached() {
+        let home = tempfile::tempdir().unwrap();
+        let raw = json!({
+            "providers": {},
+            "agents": {"defaults": {"model": "m"}},
+            "tools": {"mcpServers": {
+                "atlassian-jira": {
+                    "type": "streamableHttp",
+                    "url": "http://127.0.0.1:1/mcp",
+                    "oauth": {"enabled": true}
+                }
+            }}
+        });
+        let cfg: Config = serde_json::from_value(raw).unwrap();
+        // Force `zunel_home()` to look at the tempdir so
+        // `refresh_if_needed` reads "no cached token" instead of
+        // whatever the dev box happens to have under `~/.zunel`.
+        std::env::set_var("ZUNEL_HOME", home.path());
+
+        let mut registry = ToolRegistry::new();
+        register_mcp_tools(&mut registry, &cfg).await;
+
+        let names: Vec<&str> = registry.names().collect();
+        assert!(
+            names.contains(&"mcp_atlassian-jira_login_required"),
+            "expected an auth-required stub in the registry, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("mcp_atlassian-jira_")
+                && n != &"mcp_atlassian-jira_login_required"),
+            "no real MCP tools should be registered before OAuth login: {names:?}"
+        );
+    }
+
+    /// `Outcome::StillFresh` (or any non-needs-login variant) must
+    /// NOT register a stub: that path is supposed to dial out and
+    /// register the real tools. We can't test "actually connects"
+    /// without a real MCP server here, but we can assert the
+    /// `needs_login` decision is false for fresh-token state.
+    #[test]
+    fn remote_oauth_state_needs_login_only_for_login_required_outcomes() {
+        use mcp_oauth_refresh::Outcome::*;
+        for outcome in [
+            StillFresh { secs_remaining: 60 },
+            Refreshed {
+                new_expires_in: Some(3600),
+            },
+            NoExpiry,
+        ] {
+            let state = McpRemoteOauthState {
+                static_headers: BTreeMap::new(),
+                oauth_enabled: true,
+                auth_provider: None,
+                refresh_outcome: Some(outcome),
+            };
+            assert!(!state.needs_login());
+        }
+        for (outcome, reason) in [
+            (NotCached, "not_cached"),
+            (NoRefreshToken, "no_refresh_token"),
+            (NoTokenUrl, "no_token_url"),
+            (RefreshFailed("oh no".into()), "refresh_failed"),
+        ] {
+            let state = McpRemoteOauthState {
+                static_headers: BTreeMap::new(),
+                oauth_enabled: true,
+                auth_provider: None,
+                refresh_outcome: Some(outcome),
+            };
+            assert!(state.needs_login(), "should require login for: {reason}");
+            assert_eq!(state.reason_tag(), reason);
+        }
+        // OAuth disabled => no stub even for "needs login" outcomes.
+        let disabled = McpRemoteOauthState {
+            static_headers: BTreeMap::new(),
+            oauth_enabled: false,
+            auth_provider: None,
+            refresh_outcome: Some(NotCached),
+        };
+        assert!(!disabled.needs_login());
     }
 }

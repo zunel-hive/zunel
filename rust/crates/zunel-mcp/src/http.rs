@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
@@ -10,6 +11,17 @@ use url::Url;
 use crate::schema::normalize_schema_for_openai;
 use crate::stdio::render_call_result;
 use crate::{Error, McpClient, McpToolDefinition, Result};
+
+/// Read each request's `Authorization` header lazily, so a refresh
+/// task that rewrites `~/.zunel/mcp-oauth/<server>/token.json` while
+/// the gateway is running picks up the new value on the *next* MCP
+/// call without having to tear down and re-`connect()` the client.
+///
+/// The closure returns `None` to mean "drop the header for this
+/// request" (used when the cache file is missing or unreadable).
+/// `static_headers` already on the client always go on the wire;
+/// the provider only contributes the dynamic `Authorization`.
+pub type AuthHeaderProvider = Arc<dyn Fn() -> Option<HeaderValue> + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteTransport {
@@ -31,7 +43,8 @@ pub struct RemoteMcpClient {
     client: reqwest::Client,
     url: String,
     endpoint: Option<String>,
-    headers: HeaderMap,
+    static_headers: HeaderMap,
+    auth_provider: Option<AuthHeaderProvider>,
     session_id: Option<String>,
     next_id: u64,
     sse_rx: Option<mpsc::Receiver<Value>>,
@@ -44,12 +57,27 @@ impl RemoteMcpClient {
         transport: RemoteTransport,
         init_timeout_secs: u64,
     ) -> Result<Self> {
+        Self::connect_with_auth(url, headers, None, transport, init_timeout_secs).await
+    }
+
+    /// Connect with a live auth-header provider that the client
+    /// consults on every outbound request. Used by the gateway to
+    /// pick up tokens rewritten by the periodic refresh task without
+    /// reconnecting; `connect()` (above) is sugar for "no provider".
+    pub async fn connect_with_auth(
+        url: &str,
+        headers: BTreeMap<String, String>,
+        auth_provider: Option<AuthHeaderProvider>,
+        transport: RemoteTransport,
+        init_timeout_secs: u64,
+    ) -> Result<Self> {
         let mut client = Self {
             transport,
             client: reqwest::Client::new(),
             url: url.trim_end_matches('/').to_string(),
             endpoint: None,
-            headers: headers_to_map(headers)?,
+            static_headers: headers_to_map(headers)?,
+            auth_provider,
             session_id: None,
             next_id: 1,
             sse_rx: None,
@@ -79,6 +107,24 @@ impl RemoteMcpClient {
             .notify("notifications/initialized", json!({}))
             .await?;
         Ok(client)
+    }
+
+    /// Compose `static_headers + auth_provider()` into a fresh
+    /// [`HeaderMap`] for one outbound request. The provider's
+    /// `None` is honored as "drop the Authorization header" so
+    /// the gateway can intentionally clear a stale bearer between
+    /// refreshes if it wants to (current callers don't, but the
+    /// shape is the right one).
+    fn outbound_headers(&self) -> HeaderMap {
+        let mut headers = self.static_headers.clone();
+        if let Some(provider) = &self.auth_provider {
+            if let Some(value) = provider() {
+                headers.insert(reqwest::header::AUTHORIZATION, value);
+            } else {
+                headers.remove(reqwest::header::AUTHORIZATION);
+            }
+        }
+        headers
     }
 
     pub async fn list_tools(&mut self, timeout_secs: u64) -> Result<Vec<McpToolDefinition>> {
@@ -216,7 +262,7 @@ impl RemoteMcpClient {
         let mut response = self
             .client
             .post(url)
-            .headers(self.headers.clone())
+            .headers(self.outbound_headers())
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
             .header("MCP-Protocol-Version", "2024-11-05");
@@ -248,7 +294,7 @@ impl RemoteMcpClient {
         let mut response = self
             .client
             .post(url)
-            .headers(self.headers.clone())
+            .headers(self.outbound_headers())
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
             .header("MCP-Protocol-Version", "2024-11-05");
@@ -282,7 +328,7 @@ impl RemoteMcpClient {
         let response = self
             .client
             .get(&self.url)
-            .headers(self.headers.clone())
+            .headers(self.outbound_headers())
             .header(ACCEPT, "text/event-stream")
             .send()
             .await?;
@@ -390,6 +436,20 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
         return Ok(response);
     }
     let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        // Surface 401s as a typed variant so the per-tool wrapper can
+        // convert them into the `MCP_AUTH_REQUIRED:` contract string
+        // the chat-driven login skill watches for. `WWW-Authenticate`
+        // is optional — RFC 9728 IdPs put `error="invalid_token"`
+        // there for the agent to inspect, but plenty of servers omit
+        // it on 401.
+        let www_authenticate = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        return Err(Error::Unauthorized { www_authenticate });
+    }
     let url = response.url().clone();
     let body = response.text().await.unwrap_or_default();
     Err(Error::Protocol(format!(

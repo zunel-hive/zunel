@@ -9,4 +9,4 @@ mod loader;
 
 pub use error::{Error, Result};
 pub use frontmatter::{Frontmatter, MetadataRaw, ParsedMetadata};
-pub use loader::{Skill, SkillsLoader};
+pub use loader::{Skill, SkillsLoader, EMBEDDED_BUILTIN_LABEL};

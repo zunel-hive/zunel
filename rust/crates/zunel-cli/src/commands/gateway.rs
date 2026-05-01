@@ -23,6 +23,12 @@ use crate::commands::gateway_scheduler::GatewayScheduler;
 const BOT_REFRESH_DEFAULT_TICK_SECS: u64 = 1800;
 const BOT_REFRESH_DEFAULT_WINDOW_SECS: i64 = 1800;
 
+/// Wake up every 30 minutes to walk OAuth-enabled remote MCP servers
+/// and rotate any access token whose refresh leeway is up. Tunable
+/// via `ZUNEL_MCP_REFRESH_TICK_SECS`; set `ZUNEL_MCP_REFRESH_DISABLED=1`
+/// to opt out entirely.
+const MCP_REFRESH_DEFAULT_TICK_SECS: u64 = 1800;
+
 pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
     let cfg = zunel_config::load_config(config_path).with_context(|| "loading zunel config")?;
     let workspace = zunel_config::workspace_path(&cfg.agents.defaults)
@@ -114,6 +120,7 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
     };
 
     let bot_refresh_task = spawn_bot_refresh_task(config_path);
+    let mcp_refresh_task = spawn_mcp_refresh_task(config_path);
 
     tokio::signal::ctrl_c()
         .await
@@ -128,6 +135,9 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
         handle.abort();
     }
     if let Some(handle) = bot_refresh_task {
+        handle.abort();
+    }
+    if let Some(handle) = mcp_refresh_task {
         handle.abort();
     }
     Ok(())
@@ -235,6 +245,152 @@ fn parse_env_or(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+/// Periodic in-runtime refresh of every OAuth-enabled remote MCP
+/// server's cached access token.
+///
+/// Mirrors [`spawn_bot_refresh_task`] (commit 4a34100) but for the
+/// MCP side: every `ZUNEL_MCP_REFRESH_TICK_SECS` seconds (default
+/// 30 min) the task walks each OAuth-enabled remote server in the
+/// loaded config and calls `zunel_mcp::oauth::refresh_if_needed`
+/// against its cached token. Tokens within the leeway window are
+/// rotated via `grant_type=refresh_token` and rewritten atomically;
+/// `RemoteMcpClient`'s live auth-provider closure picks up the new
+/// bearer on the very next request, so long-running gateways
+/// (notably `brew services start zunel`) never serve a stale 401
+/// to Slack-driven MCP calls.
+///
+/// Returns `None` when:
+/// - `ZUNEL_MCP_REFRESH_DISABLED` is set to anything truthy
+///   (`1`, `true`, …) — operators who want full external control.
+/// - The config can't be loaded — we surface a warn and back off so
+///   gateway startup keeps succeeding.
+/// - The active config has no OAuth-enabled remote MCP servers — we
+///   wouldn't have anything to refresh.
+fn spawn_mcp_refresh_task(config_path: Option<&Path>) -> Option<tokio::task::JoinHandle<()>> {
+    if env_disabled("ZUNEL_MCP_REFRESH_DISABLED") {
+        tracing::info!("in-runtime MCP OAuth refresh disabled via ZUNEL_MCP_REFRESH_DISABLED");
+        return None;
+    }
+    let cfg = match zunel_config::load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::warn!(error = %err, "in-runtime MCP OAuth refresh disabled: cannot load config");
+            return None;
+        }
+    };
+    let oauth_servers: Vec<String> = cfg
+        .tools
+        .mcp_servers
+        .iter()
+        .filter(|(_, server)| {
+            server.url.is_some()
+                && server
+                    .normalized_oauth()
+                    .map(|oauth| oauth.enabled)
+                    .unwrap_or(false)
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    if oauth_servers.is_empty() {
+        tracing::debug!(
+            "in-runtime MCP OAuth refresh inactive: no OAuth-enabled remote MCP servers configured"
+        );
+        return None;
+    }
+    let home = match zunel_config::zunel_home() {
+        Ok(home) => home,
+        Err(err) => {
+            tracing::warn!(error = %err, "in-runtime MCP OAuth refresh disabled: cannot resolve zunel home");
+            return None;
+        }
+    };
+    let tick_secs = parse_env_or("ZUNEL_MCP_REFRESH_TICK_SECS", MCP_REFRESH_DEFAULT_TICK_SECS);
+    Some(tokio::spawn(mcp_refresh_loop(
+        cfg,
+        home,
+        tick_secs,
+        oauth_servers,
+    )))
+}
+
+async fn mcp_refresh_loop(
+    cfg: zunel_config::Config,
+    home: PathBuf,
+    tick_secs: u64,
+    server_names: Vec<String>,
+) {
+    tracing::info!(
+        servers = ?server_names,
+        tick_secs,
+        "starting in-runtime MCP OAuth token refresh"
+    );
+    let mut ticker = tokio::time::interval(Duration::from_secs(tick_secs));
+    // First tick fires immediately and re-validates every cached
+    // token on startup, in addition to the per-server validation
+    // `register_mcp_tools` already did. The duplication is cheap
+    // (one disk read per server when the token's still fresh) and
+    // catches the corner case where the gateway's been up across a
+    // refresh-token revocation that happened while it was idle.
+    loop {
+        ticker.tick().await;
+        let outcomes = zunel_mcp::oauth::refresh_all_oauth_servers(&home, &cfg).await;
+        for (server, outcome) in outcomes {
+            log_mcp_refresh_outcome(&server, outcome);
+        }
+    }
+}
+
+fn log_mcp_refresh_outcome(server: &str, outcome: zunel_mcp::OAuthRefreshOutcome) {
+    use zunel_mcp::OAuthRefreshOutcome::*;
+    match outcome {
+        StillFresh { secs_remaining } => {
+            tracing::debug!(
+                server,
+                secs_remaining,
+                "MCP OAuth token still fresh; refresh tick skipped"
+            );
+        }
+        Refreshed { new_expires_in } => {
+            tracing::info!(
+                server,
+                new_expires_in,
+                "refreshed MCP OAuth access token via in-runtime task"
+            );
+        }
+        NotCached | NoExpiry => {}
+        NoRefreshToken => {
+            tracing::warn!(
+                server,
+                "MCP OAuth refresh tick: no refresh_token cached; user must re-login \
+                 (chat: ask the agent; CLI: `zunel mcp login {server} --force`)",
+                server = server
+            );
+        }
+        NoTokenUrl => {
+            tracing::warn!(
+                server,
+                "MCP OAuth refresh tick: token cache is missing tokenUrl; user must re-login \
+                 (chat: ask the agent; CLI: `zunel mcp login {server} --force`)",
+                server = server
+            );
+        }
+        RefreshFailed(err) => {
+            tracing::warn!(
+                server,
+                error = %err,
+                "MCP OAuth refresh tick failed; will retry on next tick"
+            );
+        }
+    }
+}
+
+fn env_disabled(key: &str) -> bool {
+    matches!(
+        std::env::var(key).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
+
 fn build_scheduler(
     cfg: &zunel_config::Config,
     workspace: std::path::PathBuf,
@@ -300,5 +456,94 @@ fn parse_approval_scope(s: &str) -> ApprovalScope {
         "shell" => ApprovalScope::Shell,
         "writes" | "write" => ApprovalScope::Writes,
         _ => ApprovalScope::All,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zunel_config::mcp_oauth::{load_token, save_token, CachedMcpOAuthToken};
+
+    #[test]
+    fn env_disabled_recognises_truthy_values() {
+        for value in ["1", "true", "TRUE", "yes", "YES"] {
+            std::env::set_var("ZUNEL_TEST_ENV_DISABLED_FLAG", value);
+            assert!(
+                env_disabled("ZUNEL_TEST_ENV_DISABLED_FLAG"),
+                "{value} should be truthy"
+            );
+        }
+        for value in ["0", "false", "no", "", "off"] {
+            std::env::set_var("ZUNEL_TEST_ENV_DISABLED_FLAG", value);
+            assert!(
+                !env_disabled("ZUNEL_TEST_ENV_DISABLED_FLAG"),
+                "{value} should NOT be truthy"
+            );
+        }
+        std::env::remove_var("ZUNEL_TEST_ENV_DISABLED_FLAG");
+        assert!(!env_disabled("ZUNEL_TEST_ENV_DISABLED_FLAG"));
+    }
+
+    /// One tick of the periodic refresh task: configure an
+    /// OAuth-enabled remote MCP server with a stale cached token,
+    /// run a single iteration of [`refresh_all_oauth_servers`] (the
+    /// inner step the loop performs), and assert the on-disk cache
+    /// was rewritten. Cheap and deterministic — no `interval()`
+    /// pause juggling needed because the loop's tick body is one
+    /// straight-line library call.
+    #[tokio::test]
+    async fn mcp_refresh_tick_rewrites_stale_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "fresh-access",
+                "refresh_token": "fresh-refresh",
+                "token_type": "Bearer",
+                "expires_in": 7200
+            })))
+            .mount(&server)
+            .await;
+
+        let home = tempfile::tempdir().unwrap();
+        let stale = CachedMcpOAuthToken {
+            access_token: "stale-access".into(),
+            token_type: Some("Bearer".into()),
+            refresh_token: Some("stale-refresh".into()),
+            expires_in: Some(60),
+            scope: None,
+            obtained_at: 1,
+            client_id: "client".into(),
+            client_secret: None,
+            authorization_url: format!("{}/authorize", server.uri()),
+            token_url: format!("{}/token", server.uri()),
+        };
+        save_token(home.path(), "remote", &stale).unwrap();
+
+        let raw = json!({
+            "providers": {},
+            "agents": {"defaults": {"model": "m"}},
+            "tools": {"mcpServers": {"remote": {
+                "type": "streamableHttp",
+                "url": format!("{}/mcp", server.uri()),
+                "oauth": {"enabled": true}
+            }}}
+        });
+        let cfg: zunel_config::Config = serde_json::from_value(raw).unwrap();
+
+        let outcomes = zunel_mcp::oauth::refresh_all_oauth_servers(home.path(), &cfg).await;
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            outcomes[0].1,
+            zunel_mcp::OAuthRefreshOutcome::Refreshed { .. }
+        ));
+
+        let after = load_token(home.path(), "remote").unwrap().unwrap();
+        assert_eq!(after.access_token, "fresh-access");
+        assert_eq!(after.refresh_token.as_deref(), Some("fresh-refresh"));
+        assert_eq!(after.expires_in, Some(7200));
     }
 }

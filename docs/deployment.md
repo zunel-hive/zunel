@@ -230,11 +230,15 @@ Tunables (env vars on the gateway process):
 
 | Env var                          | Default | Meaning                                      |
 | -------------------------------- | ------- | -------------------------------------------- |
-| `ZUNEL_BOT_REFRESH_TICK_SECS`    | `1800`  | How often the in-runtime task wakes up       |
-| `ZUNEL_BOT_REFRESH_WINDOW_SECS`  | `1800`  | Refresh when token has less than this many seconds left |
+| `ZUNEL_BOT_REFRESH_TICK_SECS`    | `1800`  | How often the Slack bot-token refresh task wakes up |
+| `ZUNEL_BOT_REFRESH_WINDOW_SECS`  | `1800`  | Refresh the Slack bot token when it has less than this many seconds left |
+| `ZUNEL_MCP_REFRESH_TICK_SECS`    | `1800`  | How often the remote-MCP OAuth refresh task wakes up. Walks every OAuth-enabled server in `tools.mcpServers` and rotates `~/.zunel/mcp-oauth/<server>/token.json` via the cached `refresh_token`. |
+| `ZUNEL_MCP_REFRESH_DISABLED`     | unset   | Set to `1` / `true` / `yes` to skip spawning the remote-MCP refresh task entirely |
 
 Users without bot rotation (no `slack-app/app_info.json` on disk) pay
-no cost — the task simply doesn't spawn.
+no cost — the bot-refresh task simply doesn't spawn. The MCP-refresh
+task is similarly cheap: it self-disables when no remote MCP server has
+`oauth.enabled = true` in `config.json`.
 
 ### Custom LaunchAgent (advanced)
 

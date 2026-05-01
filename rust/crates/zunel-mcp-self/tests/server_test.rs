@@ -371,3 +371,216 @@ async fn native_self_mcp_server_sends_slack_message_to_channel() {
     assert!(sent.contains("\"channel\":\"C1\""), "{sent}");
     assert!(!sent.contains("xoxb-secret"), "{sent}");
 }
+
+/// End-to-end smoke for the chat-driven OAuth login pair:
+///
+/// 1. `mcp_login_start` returns an authorize URL pointing at the
+///    wiremock IdP, with the same `state`/`code_challenge` that
+///    `pending.json` was just persisted with.
+/// 2. `mcp_login_complete` exchanges the pasted callback URL for an
+///    access token, writes `~/.zunel/mcp-oauth/<server>/token.json`,
+///    and removes the pending file.
+#[tokio::test]
+async fn native_self_mcp_server_chat_oauth_login_start_then_complete() {
+    let home = tempfile::tempdir().unwrap();
+    let auth = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "atk-self",
+            "refresh_token": "rtk-self",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "mcp"
+        })))
+        .mount(&auth)
+        .await;
+
+    fs::write(
+        home.path().join("config.json"),
+        format!(
+            r#"{{
+                "providers": {{}},
+                "agents": {{"defaults": {{"model": "m"}}}},
+                "tools": {{"mcpServers": {{"remote": {{
+                    "type": "streamableHttp",
+                    "url": "{base}/mcp",
+                    "oauth": {{
+                        "enabled": true,
+                        "clientId": "client-self",
+                        "authorizationUrl": "{base}/authorize",
+                        "tokenUrl": "{base}/token",
+                        "scope": "mcp",
+                        "redirectUri": "http://127.0.0.1:33419/callback"
+                    }}
+                }}}}}}
+            }}"#,
+            base = auth.uri()
+        ),
+    )
+    .unwrap();
+
+    let bin = cargo_bin("zunel-mcp-self");
+    let mut env = BTreeMap::new();
+    env.insert(
+        "ZUNEL_HOME".to_string(),
+        home.path().to_string_lossy().to_string(),
+    );
+    let mut client = StdioMcpClient::connect(bin.to_string_lossy().as_ref(), &[], env, 5)
+        .await
+        .unwrap();
+
+    let tools = client.list_tools(5).await.unwrap();
+    assert!(
+        tools.iter().any(|tool| tool.name == "mcp_login_start"),
+        "tools/list should include mcp_login_start"
+    );
+    assert!(
+        tools.iter().any(|tool| tool.name == "mcp_login_complete"),
+        "tools/list should include mcp_login_complete"
+    );
+
+    let started = client
+        .call_tool(
+            "mcp_login_start",
+            serde_json::json!({"server": "remote"}),
+            5,
+        )
+        .await
+        .unwrap();
+    let started: serde_json::Value = serde_json::from_str(&started)
+        .unwrap_or_else(|err| panic!("mcp_login_start returned non-JSON ({err}): {started}"));
+    assert_eq!(started["ok"], serde_json::Value::Bool(true), "{started}");
+    assert_eq!(started["server"], "remote");
+    let authorize_url = started["authorize_url"]
+        .as_str()
+        .expect("authorize_url present");
+    assert!(authorize_url.starts_with(&format!("{}/authorize", auth.uri())));
+    assert!(authorize_url.contains("code_challenge"));
+    assert!(authorize_url.contains("client_id=client-self"));
+    let parsed = reqwest::Url::parse(authorize_url).unwrap();
+    let state = parsed
+        .query_pairs()
+        .find_map(|(k, v)| (k == "state").then(|| v.into_owned()))
+        .expect("authorize URL must carry a state");
+
+    // Pending state landed on disk.
+    let pending_path = home
+        .path()
+        .join("mcp-oauth")
+        .join("remote")
+        .join("pending.json");
+    assert!(pending_path.exists(), "pending.json must be written");
+
+    let completed = client
+        .call_tool(
+            "mcp_login_complete",
+            serde_json::json!({
+                "server": "remote",
+                "callback_url": format!(
+                    "http://127.0.0.1:33419/callback?code=callback-code&state={state}"
+                ),
+            }),
+            5,
+        )
+        .await
+        .unwrap();
+    let completed: serde_json::Value = serde_json::from_str(&completed)
+        .unwrap_or_else(|err| panic!("mcp_login_complete returned non-JSON ({err}): {completed}"));
+    assert_eq!(
+        completed["ok"],
+        serde_json::Value::Bool(true),
+        "{completed}"
+    );
+    assert_eq!(completed["server"], "remote");
+    assert_eq!(completed["scopes"], "mcp");
+    assert_eq!(completed["expires_in"], 3600);
+
+    // Token cache landed on disk; pending file is removed.
+    let token_path = home
+        .path()
+        .join("mcp-oauth")
+        .join("remote")
+        .join("token.json");
+    let token: serde_json::Value = serde_json::from_slice(&fs::read(token_path).unwrap()).unwrap();
+    assert_eq!(token["accessToken"], "atk-self");
+    assert_eq!(token["refreshToken"], "rtk-self");
+    assert!(!pending_path.exists(), "pending.json must be removed");
+}
+
+/// Negative smoke: state mismatch from the pasted callback URL must
+/// surface as `{ok: false, error: ...}` (not as a hard isError reply
+/// the agent has to special-case).
+#[tokio::test]
+async fn native_self_mcp_server_chat_oauth_login_complete_rejects_state_mismatch() {
+    let home = tempfile::tempdir().unwrap();
+    let auth = MockServer::start().await;
+
+    fs::write(
+        home.path().join("config.json"),
+        format!(
+            r#"{{
+                "providers": {{}},
+                "agents": {{"defaults": {{"model": "m"}}}},
+                "tools": {{"mcpServers": {{"remote": {{
+                    "type": "streamableHttp",
+                    "url": "{base}/mcp",
+                    "oauth": {{
+                        "enabled": true,
+                        "clientId": "client-self",
+                        "authorizationUrl": "{base}/authorize",
+                        "tokenUrl": "{base}/token",
+                        "scope": "mcp",
+                        "redirectUri": "http://127.0.0.1:33419/callback"
+                    }}
+                }}}}}}
+            }}"#,
+            base = auth.uri()
+        ),
+    )
+    .unwrap();
+
+    let bin = cargo_bin("zunel-mcp-self");
+    let mut env = BTreeMap::new();
+    env.insert(
+        "ZUNEL_HOME".to_string(),
+        home.path().to_string_lossy().to_string(),
+    );
+    let mut client = StdioMcpClient::connect(bin.to_string_lossy().as_ref(), &[], env, 5)
+        .await
+        .unwrap();
+
+    // Start so a `pending.json` exists.
+    let _ = client
+        .call_tool(
+            "mcp_login_start",
+            serde_json::json!({"server": "remote"}),
+            5,
+        )
+        .await
+        .unwrap();
+
+    let result = client
+        .call_tool(
+            "mcp_login_complete",
+            serde_json::json!({
+                "server": "remote",
+                "callback_url": "http://127.0.0.1:33419/callback?code=x&state=tampered"
+            }),
+            5,
+        )
+        .await
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["ok"], serde_json::Value::Bool(false), "{parsed}");
+    let err_msg = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        err_msg.contains("state mismatch"),
+        "unexpected error: {err_msg}"
+    );
+
+    // Pending file is *retained* after a state-mismatch error so the
+    // user can retry the same authorize URL.
+    assert!(home.path().join("mcp-oauth/remote/pending.json").exists());
+}

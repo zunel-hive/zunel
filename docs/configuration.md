@@ -729,6 +729,10 @@ then prompts for the full callback URL. Tokens are cached at
 servers automatically receive `Authorization: Bearer <access_token>` from that
 cache unless their config already defines an `Authorization` header.
 
+Cached `Authorization` headers are re-read from disk on every outbound MCP
+request, so background token rotation (see below) takes effect for live
+gateways without a reconnect.
+
 Optional OAuth config fields:
 
 | Field | Meaning |
@@ -739,6 +743,67 @@ Optional OAuth config fields:
 | `oauth.scope` | Space-separated scopes to request |
 | `oauth.redirectUri` | Full redirect URI override |
 | `oauth.callbackHost` / `oauth.callbackPort` | Local redirect URI pieces when `oauth.redirectUri` is omitted |
+
+#### Logging in to a remote MCP server from chat
+
+`zunel mcp login` is the primary path, but the agent can also drive the OAuth
+flow over Slack (or any chat surface) when the user has no shell access. The
+flow is **paste-back only**: the agent posts the IdP authorize URL, the user
+completes the browser step, copies the redirect URL the IdP lands on, and
+pastes it back into the same chat. Two self-MCP tools wire it together:
+
+- `mcp_login_start { server }` — generates state + PKCE, persists a
+  `~/.zunel/mcp-oauth/<server>/pending.json` (10-minute TTL), and returns
+  the authorize URL plus paste-back instructions.
+- `mcp_login_complete { server, callback_url }` — exchanges the code for an
+  access + refresh token, atomic-writes `token.json`, and deletes the pending
+  file.
+
+The agent picks this up automatically because the bundled
+[`mcp-oauth-login` skill](../rust/crates/zunel-skills/builtins/mcp-oauth-login/SKILL.md)
+listens for natural-language triggers (`log me into <server>`, `reauth
+<server>`, `sign in to <server>`) **and** for tool errors of the form
+`MCP_AUTH_REQUIRED:server=<server>; reason=<reason>`. That contract is the
+agent's signal that a server has no usable token (cold start, refresh failure,
+or a 401 mid-conversation) — see the auto-prompt section below for the
+runtime side.
+
+#### `MCP_AUTH_REQUIRED:` error contract
+
+Whenever an OAuth-enabled remote MCP server cannot authenticate, every tool
+call against it surfaces a stable error string instead of disappearing from
+the registry:
+
+```
+MCP_AUTH_REQUIRED:server=<server>; reason=<not_cached|no_refresh_token|no_token_url|invalid_token>
+```
+
+Two paths produce that string:
+
+- **Startup**: when `register_mcp_tools` cannot load or refresh a token for an
+  OAuth-enabled server, it registers an `mcp_<server>_login_required` stub
+  tool that returns the contract string for any call.
+- **Runtime**: when an outbound MCP request returns HTTP 401, the
+  `RemoteMcpClient` maps it to `Error::Unauthorized` and the tool wrapper
+  emits the same contract string.
+
+Operators do not have to do anything with this string directly; it exists so
+the bundled skill can drive a chat-side login when the agent hits an
+auth-needed wall.
+
+#### Background token refresh
+
+`zunel gateway` runs a periodic refresh task that walks every OAuth-enabled
+remote MCP server and calls the same refresh-token path the CLI uses. Tunables:
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `ZUNEL_MCP_REFRESH_TICK_SECS` | `1800` (30 min) | Tick interval for the refresh task. |
+| `ZUNEL_MCP_REFRESH_DISABLED` | unset | Set to `1`/`true`/`yes` to disable the task entirely. |
+
+Because outbound requests re-read `token.json` per call, a successful refresh
+in this loop is picked up by the next MCP request without restarting the
+gateway.
 
 ### Slack user MCP (read as you)
 

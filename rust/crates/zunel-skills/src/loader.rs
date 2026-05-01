@@ -1,8 +1,22 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use include_dir::{include_dir, Dir, DirEntry};
+
 use crate::error::Result;
 use crate::frontmatter::{split, ParsedMetadata};
+
+/// Skills shipped inside the binary. Resolved at compile time from the
+/// crate's `builtins/` directory; the include macro silently produces an
+/// empty `Dir` if the directory is missing, which keeps lower-level
+/// tooling (cargo-deny, doc builds) happy without a sentinel file.
+static BUILTIN_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/builtins");
+
+/// Synthetic path prefix used when a skill is sourced from
+/// [`BUILTIN_DIR`]. Visible in `Skill.path.display()` and in the skills
+/// summary block so operators can tell at a glance whether a skill is
+/// bundled vs. user-authored.
+pub const EMBEDDED_BUILTIN_LABEL: &str = "<embedded-builtin>";
 
 /// Summary metadata for a loaded skill.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,8 +29,11 @@ pub struct Skill {
     pub parsed_metadata: ParsedMetadata,
 }
 
-/// Reads `<workspace>/skills/<name>/SKILL.md` first, then the packaged
-/// builtin skills dir if provided. User skills win for name collisions.
+/// Reads `<workspace>/skills/<name>/SKILL.md` first, then a filesystem
+/// builtin override directory (used by tests and ad-hoc operator
+/// overrides), and finally the skills bundled into the binary at compile
+/// time. User skills win for name collisions; the embedded source is the
+/// lowest-priority fallback.
 pub struct SkillsLoader {
     workspace: PathBuf,
     builtin: Option<PathBuf>,
@@ -41,6 +58,7 @@ impl SkillsLoader {
         if let Some(builtin) = &self.builtin {
             self.collect_into(builtin, &mut by_name)?;
         }
+        collect_embedded_into(&BUILTIN_DIR, &mut by_name)?;
         let mut out: Vec<Skill> = by_name
             .into_values()
             .filter(|s| !self.disabled.contains(&s.name))
@@ -53,7 +71,8 @@ impl SkillsLoader {
     }
 
     /// Return the full markdown body for a single skill, searching
-    /// workspace first then builtin. Frontmatter is stripped.
+    /// workspace first, then the filesystem builtin override, then the
+    /// embedded builtins. Frontmatter is stripped.
     pub fn load_skill(&self, name: &str) -> Result<Option<String>> {
         for root in self.roots() {
             let path = root.join("skills").join(name).join("SKILL.md");
@@ -62,6 +81,10 @@ impl SkillsLoader {
                 let (_, body) = split(&raw)?;
                 return Ok(Some(body));
             }
+        }
+        if let Some(raw) = embedded_skill_md(&BUILTIN_DIR, name) {
+            let (_, body) = split(raw)?;
+            return Ok(Some(body));
         }
         Ok(None)
     }
@@ -162,6 +185,47 @@ impl SkillsLoader {
         }
         Ok(())
     }
+}
+
+fn collect_embedded_into(dir: &Dir<'_>, by_name: &mut BTreeMap<String, Skill>) -> Result<()> {
+    for entry in dir.entries() {
+        let DirEntry::Dir(sub) = entry else {
+            continue;
+        };
+        let Some(name) = sub.path().file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if by_name.contains_key(name) {
+            continue;
+        }
+        let Some(skill_md) = sub.get_file(sub.path().join("SKILL.md")) else {
+            continue;
+        };
+        let Some(raw) = skill_md.contents_utf8() else {
+            continue;
+        };
+        let (fm, _body) = split(raw)?;
+        let meta = fm.parsed_metadata();
+        let (available, unavailable_reason) = check_requirements(&meta);
+        let display_path = PathBuf::from(format!("{EMBEDDED_BUILTIN_LABEL}/{name}/SKILL.md"));
+        by_name.insert(
+            name.to_string(),
+            Skill {
+                name: name.to_string(),
+                description: fm.description,
+                path: display_path,
+                available,
+                unavailable_reason,
+                parsed_metadata: meta,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn embedded_skill_md<'a>(dir: &'a Dir<'_>, name: &str) -> Option<&'a str> {
+    let path = PathBuf::from(name).join("SKILL.md");
+    dir.get_file(path)?.contents_utf8()
 }
 
 fn check_requirements(meta: &ParsedMetadata) -> (bool, Option<String>) {

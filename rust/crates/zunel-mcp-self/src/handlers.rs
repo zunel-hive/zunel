@@ -169,6 +169,27 @@ fn tools_list() -> Value {
                     }
                 }
             },
+            {
+                "name": "mcp_login_start",
+                "description": "Start an OAuth login flow for a remote MCP server. Returns the authorize URL the user should open in their browser; after they approve, they paste the redirect URL back into chat and the agent calls `mcp_login_complete`. Use this for `log me into <server>`, `reauth <server>`, or after an MCP tool call returns an error starting with `MCP_AUTH_REQUIRED:`. Side effect: writes `~/.zunel/mcp-oauth/<server>/pending.json` (10-min TTL).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"server": {"type": "string"}},
+                    "required": ["server"]
+                }
+            },
+            {
+                "name": "mcp_login_complete",
+                "description": "Finish an OAuth login flow started by `mcp_login_start`. Pass the full redirect URL the IdP sent the user back to (or just the `?code=...&state=...` query string). Side effect: writes `~/.zunel/mcp-oauth/<server>/token.json` and removes the pending file on success.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "server": {"type": "string"},
+                        "callback_url": {"type": "string"}
+                    },
+                    "required": ["server", "callback_url"]
+                }
+            },
             zunel_mcp_slack::capability_tool_descriptor()
         ]
     })
@@ -216,6 +237,14 @@ async fn call_tool(msg: &Value) -> Value {
         }
         "zunel_slack_capability" | "slack_capability" => {
             wrap(Ok(zunel_mcp_slack::capability_report()))
+        }
+        "mcp_login_start" => {
+            let args = call_args(msg);
+            wrap(mcp_login_start(&args).await)
+        }
+        "mcp_login_complete" => {
+            let args = call_args(msg);
+            wrap(mcp_login_complete(&args).await)
         }
         _ => {
             json!({"content": [{"type": "text", "text": format!("unknown tool: {name}")}], "isError": true})
@@ -684,6 +713,78 @@ fn resolve_slack_bot_token_from_app_info() -> Option<String> {
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
         .map(str::to_string)
+}
+
+/// Begin an OAuth login flow for a remote MCP server.
+///
+/// Wraps [`zunel_mcp::oauth::start_flow`] so the agent can post the
+/// authorize URL into Slack and instruct the user to paste back the
+/// redirect. Returns a JSON document the agent can render verbatim;
+/// the `instructions` field is intentionally human-friendly so we can
+/// rewrite it without a binary change if Slack UX feedback comes in.
+async fn mcp_login_start(args: &Value) -> Result<String> {
+    let server = args
+        .get("server")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("server is required"))?;
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let home = zunel_config::zunel_home().context("resolving zunel home directory")?;
+    let started = zunel_mcp::oauth::start_flow(&home, &cfg, server, None)
+        .await
+        .with_context(|| format!("starting OAuth flow for '{server}'"))?;
+
+    let instructions = format!(
+        "Open the URL above in your browser. After you approve in your browser, the page \
+         will show the redirect URL (or your browser will land on a `127.0.0.1` page). Copy \
+         that full URL and paste it back to me as your next message — I'll finish the login \
+         by calling `mcp_login_complete`. The pending login expires in {} minutes.",
+        started.expires_in / 60
+    );
+    Ok(serde_json::to_string(&json!({
+        "ok": true,
+        "server": started.server,
+        "authorize_url": started.authorize_url,
+        "redirect_uri": started.redirect_uri,
+        "expires_in": started.expires_in,
+        "instructions": instructions,
+    }))?)
+}
+
+/// Finish a `mcp_login_start` flow by exchanging the pasted redirect
+/// URL for an access token.
+///
+/// Wraps [`zunel_mcp::oauth::complete_flow`]. Returns either
+/// `{ok: true, ...}` on success or `{ok: false, error: "..."}` on
+/// any failure path so the agent doesn't have to special-case
+/// non-zero error variants.
+async fn mcp_login_complete(args: &Value) -> Result<String> {
+    let server = args
+        .get("server")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("server is required"))?;
+    let callback_url = args
+        .get("callback_url")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("callback_url is required"))?;
+    let cfg = zunel_config::load_config(None).context("loading config")?;
+    let home = zunel_config::zunel_home().context("resolving zunel home directory")?;
+    match zunel_mcp::oauth::complete_flow(&home, &cfg, server, callback_url).await {
+        Ok(completed) => Ok(serde_json::to_string(&json!({
+            "ok": true,
+            "server": completed.server,
+            "scopes": completed.scopes,
+            "expires_in": completed.expires_in,
+            "token_path": completed.token_path.display().to_string(),
+        }))?),
+        Err(err) => Ok(serde_json::to_string(&json!({
+            "ok": false,
+            "server": server,
+            "error": err.to_string(),
+        }))?),
+    }
 }
 
 fn call_args(msg: &Value) -> Value {

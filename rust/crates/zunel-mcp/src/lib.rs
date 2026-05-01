@@ -9,11 +9,19 @@ pub mod stdio;
 pub mod wrapper;
 
 pub use frame::{read_frame, write_frame};
-pub use http::{RemoteMcpClient, RemoteTransport};
-pub use oauth::{refresh_if_needed as refresh_oauth_if_needed, Outcome as OAuthRefreshOutcome};
+pub use http::{AuthHeaderProvider, RemoteMcpClient, RemoteTransport};
+pub use oauth::{
+    complete_flow as oauth_complete_flow, refresh_all_oauth_servers,
+    refresh_if_needed as refresh_oauth_if_needed, start_flow as oauth_start_flow, CompletedFlow,
+    Outcome as OAuthRefreshOutcome, StartedFlow,
+};
+pub use reqwest::header::HeaderValue;
 pub use schema::normalize_schema_for_openai;
 pub use stdio::{McpToolDefinition, StdioMcpClient};
-pub use wrapper::{McpToolWrapper, SharedMcpClient};
+pub use wrapper::{
+    format_auth_required as format_mcp_auth_required, McpAuthRequiredTool, McpToolWrapper,
+    SharedMcpClient, MCP_AUTH_REQUIRED_PREFIX,
+};
 
 #[async_trait]
 pub trait McpClient: Send + Sync {
@@ -65,6 +73,19 @@ pub enum Error {
     Timeout(u64),
     #[error("mcp url error: {0}")]
     Url(String),
+    /// 401 with a `WWW-Authenticate: Bearer ...` (or no auth scheme)
+    /// from the remote MCP server. Surfaced separately so the
+    /// [`McpToolWrapper`] can convert it into the `MCP_AUTH_REQUIRED:`
+    /// contract string the chat-driven login skill watches for.
+    /// `www_authenticate` carries whatever the server returned, for
+    /// the `error="invalid_token"` etc. parsing the agent might do.
+    #[error("mcp unauthorized (401){}",
+        match www_authenticate {
+            Some(value) => format!(": {value}"),
+            None => String::new(),
+        }
+    )]
+    Unauthorized { www_authenticate: Option<String> },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
