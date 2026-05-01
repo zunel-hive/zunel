@@ -240,7 +240,26 @@ diff -U2 /tmp/release.yml.handpatched .github/workflows/release.yml
 #    extend the `announce.if:` to gate on its result. See the current
 #    `release.yml` for the exact wiring.
 
-# 8. Verify and ship.
+# 8. Re-apply the Homebrew service-block injection inside the
+#    `publish-homebrew-formula -> Commit formula files` step's loop
+#    body. cargo-dist 0.31 does not emit a `service do...end` block,
+#    so we splice one in via a Python heredoc just before `brew
+#    style`. The block enables `brew services start zunel` for users
+#    who install via the public tap (`zunel-hive/homebrew-tap`). The
+#    splice is idempotent (skipped when a service block already
+#    exists) and lands the block right before the formula's class-
+#    closing `end`. The resulting service runs `zunel gateway` with
+#    `keep_alive true`, logs to `var/log/zunel-gateway.{out,err}.log`,
+#    and sets `RUST_LOG=info,zunel=info`.
+#
+#    Note: this is for *public* users. The maintainer's own machine
+#    (`run-gateway.sh` LaunchAgent) is independent and richer (it
+#    pre-flights `zunel slack refresh-bot` before exec'ing the
+#    gateway). Both can coexist; brew services and the custom
+#    LaunchAgent each manage their own process, so don't run both
+#    against the same `~/.zunel/` workspace simultaneously.
+
+# 9. Verify and ship.
 scripts/check.sh
 ```
 

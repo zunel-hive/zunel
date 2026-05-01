@@ -393,6 +393,39 @@ jobs:
             name=$(echo "$filename" | sed "s/\.rb$//")
             version=$(echo "$release" | jq .app_version --raw-output)
 
+            # Inject a Homebrew `service do...end` block so `brew services
+            # start zunel` works for public users. cargo-dist 0.31 doesn't
+            # know how to emit this so we splice it in just before the
+            # closing class `end`. Idempotent: skipped when a service
+            # block already exists in the formula. Documented in
+            # docs/release.md -> "Editing the release pipeline".
+            python3 - "Formula/${filename}" <<'PYEOF'
+          import sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
+          if "service do" in src:
+              print(f"formula at {p} already has a service block; skipping injection")
+              sys.exit(0)
+          service_block = """
+            service do
+              run [opt_bin/"zunel", "gateway"]
+              keep_alive true
+              log_path var/"log/zunel-gateway.out.log"
+              error_log_path var/"log/zunel-gateway.err.log"
+              environment_variables RUST_LOG: "info,zunel=info"
+            end
+          """
+          lines = src.splitlines(keepends=True)
+          for i in range(len(lines) - 1, -1, -1):
+              if lines[i].strip() == "end":
+                  lines.insert(i, "\n" + service_block)
+                  break
+          else:
+              raise SystemExit(f"could not find class-closing `end` in {p}")
+          p.write_text("".join(lines))
+          print(f"injected service block into {p}")
+          PYEOF
+
             export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
             brew update
             # We avoid reformatting user-provided data such as the app description and homepage.
