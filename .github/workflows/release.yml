@@ -440,7 +440,13 @@ jobs:
             export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
             brew update
             # We avoid reformatting user-provided data such as the app description and homepage.
-            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
+            # Layout/LineLength is excluded because the auto-aligned `PATH:` value in the
+            # `service do … environment_variables` block we inject above runs to ~135 chars
+            # (well past brew's 118 limit) and there is no shorter way to enumerate both the
+            # Apple Silicon and Intel brew prefixes plus the system path. The cop emits a
+            # GitHub Actions annotation but doesn't gate publication; excluding it keeps the
+            # next release's actions summary clean.
+            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict,Layout/LineLength --fix "Formula/${filename}" || true
 
             git add "Formula/${filename}"
             git commit -m "${name} ${version}"

@@ -557,7 +557,11 @@ falls through to the stub provider — wire one up before relying on it.
     "exec": {
       "enable": true,
       "default_timeout_secs": 60,
-      "max_timeout_secs": 600
+      "max_timeout_secs": 600,
+      "env": {
+        "PATH": "$HOME/.cargo/bin:/opt/homebrew/bin:${PATH}",
+        "LANG": "en_US.UTF-8"
+      }
     }
   }
 }
@@ -570,6 +574,39 @@ Important exec settings:
 | `enable` | `false` | Register or remove the shell `exec` tool entirely. Off by default to match the Python build's parity behavior |
 | `default_timeout_secs` | tool default | Per-command timeout when the model omits an explicit `timeout` argument. `0` falls back to the in-tool default |
 | `max_timeout_secs` | tool default | Hard ceiling on the per-command `timeout` argument. `0` falls back to the in-tool default |
+| `env` | none | Map of `KEY: VALUE` env vars layered on top of the gateway process's environment for every shell command the agent runs. Values support `${VAR}` and `${VAR:-default}` placeholders that expand against the gateway's own env at startup, so `"PATH": "$HOME/.cargo/bin:${PATH}"` extends rather than replaces. Bare `$VAR` (no braces) is left intact and resolved by the child shell instead. Missing `${VAR}` without a `:-default` expands to the empty string. |
+
+#### When you reach for `tools.exec.env`
+
+The most common reason is that the agent runs under a process supervisor
+(macOS launchd via `brew services`, systemd, Docker, …) whose default
+PATH doesn't include the user-level prefixes the agent's commands need.
+For example, brew services on macOS hands the gateway a stripped
+`/usr/bin:/bin:/usr/sbin:/sbin`. The shipped Homebrew formula already
+extends that with both `/opt/homebrew/bin` and `/usr/local/bin` (see
+[`docs/deployment.md` › macOS Service](deployment.md#macos-service-homebrew)),
+but Slack-driven `cargo`, `go`, language-version-managers, kubectl
+plugins, etc. live elsewhere. Adding them via `tools.exec.env` is the
+portable fix that doesn't require touching the launchd/systemd unit and
+survives `brew upgrade`:
+
+```json
+{
+  "tools": {
+    "exec": {
+      "enable": true,
+      "env": {
+        "PATH": "$HOME/.cargo/bin:$HOME/.rye/shims:$HOME/go/bin:${PATH}",
+        "GOFLAGS": "-mod=readonly",
+        "TZ": "America/Los_Angeles"
+      }
+    }
+  }
+}
+```
+
+Restart the gateway after editing — env values are baked into the tool
+at registry build time so changes don't pick up live.
 
 ### `self`
 

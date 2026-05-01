@@ -38,7 +38,8 @@ pub fn build_default_registry(cfg: &Config, workspace: &Path) -> ToolRegistry {
     registry.register(Arc::new(GrepTool::new(policy)));
 
     if cfg.tools.exec.enable {
-        registry.register(Arc::new(ExecTool::new_default()));
+        let exec_env = cfg.tools.exec.env.clone().unwrap_or_default();
+        registry.register(Arc::new(ExecTool::with_env(exec_env)));
     }
     if cfg.tools.web.enable {
         registry.register(Arc::new(WebFetchTool::new()));

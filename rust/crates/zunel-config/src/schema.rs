@@ -281,6 +281,29 @@ pub struct ExecToolsConfig {
     pub enable: bool,
     pub default_timeout_secs: u64,
     pub max_timeout_secs: u64,
+    /// Extra environment variables injected into every shell command
+    /// the agent runs through `ExecTool`.
+    ///
+    /// Values support `${VAR}` and `${VAR:-default}` placeholders that
+    /// expand against the gateway process's own environment at spawn
+    /// time, so users can extend `PATH` rather than replace it:
+    ///
+    /// ```jsonc
+    /// "tools": {
+    ///   "exec": {
+    ///     "env": { "PATH": "$HOME/.cargo/bin:${PATH}" }
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// Missing variables expand to the empty string (unlike the
+    /// `mcpServers.<name>.headers` substitution, which drops the
+    /// header entirely on a missing var) so a misconfigured `${VAR}`
+    /// doesn't accidentally produce an unspawnable command. Use
+    /// `${VAR:-fallback}` to be explicit when an empty expansion is
+    /// dangerous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

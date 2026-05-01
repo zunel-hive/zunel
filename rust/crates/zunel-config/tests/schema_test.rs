@@ -87,7 +87,11 @@ fn tools_section_round_trips() {
             "exec": {
                 "enable": true,
                 "default_timeout_secs": 30,
-                "max_timeout_secs": 600
+                "max_timeout_secs": 600,
+                "env": {
+                    "PATH": "$HOME/.cargo/bin:${PATH}",
+                    "LANG": "en_US.UTF-8"
+                }
             },
             "web": {
                 "enable": true,
@@ -103,6 +107,20 @@ fn tools_section_round_trips() {
     assert!(cfg.tools.exec.enable);
     assert_eq!(cfg.tools.exec.default_timeout_secs, 30);
     assert_eq!(cfg.tools.exec.max_timeout_secs, 600);
+    let exec_env = cfg
+        .tools
+        .exec
+        .env
+        .as_ref()
+        .expect("tools.exec.env should round-trip");
+    assert_eq!(
+        exec_env.get("PATH").map(String::as_str),
+        Some("$HOME/.cargo/bin:${PATH}")
+    );
+    assert_eq!(
+        exec_env.get("LANG").map(String::as_str),
+        Some("en_US.UTF-8")
+    );
     assert!(cfg.tools.web.enable);
     assert_eq!(cfg.tools.web.search_provider, "brave");
     assert_eq!(cfg.tools.web.brave_api_key.as_deref(), Some("k"));
