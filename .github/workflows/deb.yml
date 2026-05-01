@@ -67,7 +67,7 @@ jobs:
       # the source side and can't write to the binaries repo.
       GH_TOKEN: ${{ secrets.BINARIES_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
