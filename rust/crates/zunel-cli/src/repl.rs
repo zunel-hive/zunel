@@ -47,7 +47,7 @@ pub async fn run_repl(
     });
 
     println!(
-        "zunel interactive mode ({}) — /help for commands, Ctrl+C to quit\n",
+        "zunel interactive mode ({}) — /help for commands, /exit or Ctrl+D to quit\n",
         config.model_label,
     );
 

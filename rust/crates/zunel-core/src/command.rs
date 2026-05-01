@@ -106,6 +106,7 @@ pub mod builtins {
             "/clear — Clear the current conversation",
             "/status — Show bot status",
             "/restart — Restart the process",
+            "/exit — Exit the REPL (alias: /quit)",
         ]
         .join("\n")
     }
@@ -119,6 +120,16 @@ pub mod builtins {
         });
         router.register_exact("/restart", |_ctx: CommandContext| async {
             Ok::<_, crate::Error>(CommandOutcome::Restart)
+        });
+        // `/exit` and `/quit` both map to `CommandOutcome::Exit`.
+        // Two aliases because users guess one or the other (Python
+        // REPL ships `quit()`, bash builtins use `exit`); cheaper to
+        // wire both than to argue about it on every issue tracker.
+        router.register_exact("/exit", |_ctx: CommandContext| async {
+            Ok::<_, crate::Error>(CommandOutcome::Exit)
+        });
+        router.register_exact("/quit", |_ctx: CommandContext| async {
+            Ok::<_, crate::Error>(CommandOutcome::Exit)
         });
         // /status is registered by the CLI because it needs access to
         // agent-level state (model name, session message count) that

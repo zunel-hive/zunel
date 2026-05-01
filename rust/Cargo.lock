@@ -3834,7 +3834,7 @@ dependencies = [
 
 [[package]]
 name = "zunel"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3854,7 +3854,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-bus"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -3864,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-channels"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "futures",
@@ -3882,7 +3882,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-cli"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3925,7 +3925,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-config"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "dirs",
  "insta",
@@ -3939,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-context"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "chrono",
  "minijinja",
@@ -3954,7 +3954,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-core"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3983,7 +3983,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-cron"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -3996,7 +3996,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-heartbeat"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "tempfile",
@@ -4008,7 +4008,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-mcp"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4030,7 +4030,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-mcp-self"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4055,7 +4055,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-mcp-slack"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -4070,7 +4070,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-providers"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4091,7 +4091,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-skills"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "include_dir",
  "serde",
@@ -4106,7 +4106,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-tokens"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "serde_json",
  "thiserror 2.0.18",
@@ -4116,7 +4116,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-tools"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "globset",
@@ -4144,7 +4144,7 @@ dependencies = [
 
 [[package]]
 name = "zunel-util"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "dirs",
  "tempfile",

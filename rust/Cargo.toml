@@ -21,7 +21,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"
@@ -74,21 +74,21 @@ proptest = "1.5"
 
 # Internal crate paths. Versions are pinned to the workspace version so
 # cargo-deny does not flag them as wildcard deps on publishable crates.
-zunel-config = { path = "crates/zunel-config", version = "=0.2.8" }
-zunel-bus = { path = "crates/zunel-bus", version = "=0.2.8" }
-zunel-util = { path = "crates/zunel-util", version = "=0.2.8" }
-zunel-providers = { path = "crates/zunel-providers", version = "=0.2.8" }
-zunel-tokens = { path = "crates/zunel-tokens", version = "=0.2.8" }
-zunel-skills = { path = "crates/zunel-skills", version = "=0.2.8" }
-zunel-context = { path = "crates/zunel-context", version = "=0.2.8" }
-zunel-tools = { path = "crates/zunel-tools", version = "=0.2.8" }
-zunel-mcp = { path = "crates/zunel-mcp", version = "=0.2.8" }
-zunel-mcp-self = { path = "crates/zunel-mcp-self", version = "=0.2.8" }
-zunel-mcp-slack = { path = "crates/zunel-mcp-slack", version = "=0.2.8" }
-zunel-channels = { path = "crates/zunel-channels", version = "=0.2.8" }
-zunel-cron = { path = "crates/zunel-cron", version = "=0.2.8" }
-zunel-heartbeat = { path = "crates/zunel-heartbeat", version = "=0.2.8" }
-zunel-core = { path = "crates/zunel-core", version = "=0.2.8" }
+zunel-config = { path = "crates/zunel-config", version = "=0.2.9" }
+zunel-bus = { path = "crates/zunel-bus", version = "=0.2.9" }
+zunel-util = { path = "crates/zunel-util", version = "=0.2.9" }
+zunel-providers = { path = "crates/zunel-providers", version = "=0.2.9" }
+zunel-tokens = { path = "crates/zunel-tokens", version = "=0.2.9" }
+zunel-skills = { path = "crates/zunel-skills", version = "=0.2.9" }
+zunel-context = { path = "crates/zunel-context", version = "=0.2.9" }
+zunel-tools = { path = "crates/zunel-tools", version = "=0.2.9" }
+zunel-mcp = { path = "crates/zunel-mcp", version = "=0.2.9" }
+zunel-mcp-self = { path = "crates/zunel-mcp-self", version = "=0.2.9" }
+zunel-mcp-slack = { path = "crates/zunel-mcp-slack", version = "=0.2.9" }
+zunel-channels = { path = "crates/zunel-channels", version = "=0.2.9" }
+zunel-cron = { path = "crates/zunel-cron", version = "=0.2.9" }
+zunel-heartbeat = { path = "crates/zunel-heartbeat", version = "=0.2.9" }
+zunel-core = { path = "crates/zunel-core", version = "=0.2.9" }
 
 # Token counting
 tiktoken-rs = "0.7"

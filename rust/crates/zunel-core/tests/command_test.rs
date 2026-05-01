@@ -82,7 +82,32 @@ fn not_a_command_returns_none() {
 fn builtin_help_lists_known_commands() {
     use zunel_core::command::builtins::help_text;
     let text = help_text();
-    for cmd in ["/help", "/clear", "/status", "/restart"] {
+    for cmd in ["/help", "/clear", "/status", "/restart", "/exit", "/quit"] {
         assert!(text.contains(cmd), "missing {cmd} in help:\n{text}");
+    }
+}
+
+/// `/exit` and `/quit` must round-trip through `register_defaults`
+/// to `CommandOutcome::Exit` so the REPL break-loop wires up. Pin
+/// both names: users guess one or the other.
+#[test]
+fn builtin_register_defaults_wires_exit_and_quit() {
+    use zunel_core::command::builtins::register_defaults;
+    let mut router = CommandRouter::new();
+    register_defaults(&mut router);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for cmd in ["/exit", "/quit"] {
+        let ctx = CommandContext {
+            session_key: "cli:direct".into(),
+            raw: cmd.into(),
+            args: String::new(),
+        };
+        match rt.block_on(router.dispatch(&ctx)).unwrap() {
+            Some(CommandOutcome::Exit) => {}
+            other => panic!("expected Exit for {cmd}, got: {other:?}"),
+        }
     }
 }
