@@ -89,6 +89,7 @@ zunel-mcp.workspace = true
 zunel-mcp-self.workspace = true
 zunel-mcp-slack.workspace = true
 zunel-providers.workspace = true
+zunel-skills.workspace = true
 zunel-tools.workspace = true
 zunel-util.workspace = true
 

@@ -7,6 +7,7 @@ use zunel_core::{
     build_default_registry, build_default_registry_async, AgentLoop, ApprovalHandler,
     ApprovalScope, RuntimeSelfStateProvider, SessionManager, SubagentManager,
 };
+use zunel_skills::SkillsLoader;
 use zunel_tools::{self_tool::SelfTool, spawn::SpawnTool};
 
 use crate::approval_cli::StdinApprovalHandler;
@@ -52,10 +53,15 @@ pub async fn run(args: AgentArgs, config_path: Option<&Path>) -> Result<()> {
             subagents,
         },
     ))));
+    // Load skills from `<workspace>/skills/` plus the binary-bundled
+    // builtins (e.g. `mcp-oauth-login`). User skills win on name
+    // collisions; embedded builtins fill in otherwise.
+    let skills = SkillsLoader::new(&workspace, None, &[]);
     let mut builder =
         AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions.clone())
             .with_tools(registry)
             .with_workspace(workspace.clone())
+            .with_skills(skills)
             .with_approval_required(cfg.tools.approval_required)
             .with_approval_scope(parse_approval_scope(&cfg.tools.approval_scope));
     if cfg.tools.approval_required {

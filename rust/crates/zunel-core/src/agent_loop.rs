@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -5,6 +6,7 @@ use tokio::sync::mpsc;
 use zunel_bus::{MessageBus, MessageKind, OutboundMessage};
 use zunel_config::{AgentDefaults, DEFAULT_SESSION_HISTORY_WINDOW};
 use zunel_providers::{ChatMessage, GenerationSettings, LLMProvider, Role, StreamEvent, Usage};
+use zunel_skills::SkillsLoader;
 use zunel_tokens::estimate_message_tokens;
 
 use crate::approval::{
@@ -62,6 +64,14 @@ pub struct AgentLoop {
     approval_required: bool,
     approval_scope: ApprovalScope,
     workspace: std::path::PathBuf,
+    /// Optional skills loader. When set, every turn through
+    /// [`process_streamed`] / [`process_inbound_once`] gets a single
+    /// `system` message prepended that contains always-on skill bodies
+    /// plus the on-demand skills summary. The system message is
+    /// regenerated from the loader on each turn — never persisted into
+    /// the session — so updates on disk (or upgrades that swap an
+    /// embedded builtin) take effect on the next turn.
+    skills: Option<Arc<SkillsLoader>>,
     /// When `true`, [`process_inbound_once`] appends a one-line token
     /// footer to the outbound message before publishing it on the bus.
     /// Wired from `channels.showTokenFooter` so it follows the same
@@ -104,6 +114,7 @@ impl AgentLoop {
             approval_required: false,
             approval_scope: ApprovalScope::default(),
             workspace: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
+            skills: None,
             show_token_footer: false,
         }
     }
@@ -123,6 +134,7 @@ impl AgentLoop {
             approval_required: false,
             approval_scope: ApprovalScope::default(),
             workspace: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
+            skills: None,
             show_token_footer: false,
         }
     }
@@ -153,6 +165,15 @@ impl AgentLoop {
         self
     }
 
+    /// Inject a [`SkillsLoader`] so every persisted turn gets a single
+    /// `system` message prepended with the always-on skill bodies plus
+    /// the on-demand skills summary. Without this call, the agent runs
+    /// with no system message (existing pre-v0.2.8 behavior).
+    pub fn with_skills(mut self, skills: SkillsLoader) -> Self {
+        self.skills = Some(Arc::new(skills));
+        self
+    }
+
     /// Toggle the per-message token-usage footer on the gateway path.
     /// Has no effect on `process_direct` / `process_streamed`, which
     /// just return `RunResult.usage` for the caller to decide what to
@@ -176,6 +197,36 @@ impl AgentLoop {
             max_tokens: self.defaults.max_tokens,
             reasoning_effort: self.defaults.reasoning_effort.clone(),
         }
+    }
+
+    /// Render the per-turn skills system message. Returns `None` when
+    /// no loader is configured, when the loader yields no always-on
+    /// bodies *and* no summary lines, or when the loader fails to read
+    /// any of its sources (failures degrade to "no system message" so a
+    /// transient I/O error never breaks the agent loop).
+    fn build_skills_system_message(&self) -> Option<ChatMessage> {
+        let loader = self.skills.as_ref()?;
+        let always = loader.get_always_skills().ok()?;
+        let always_blob = loader.load_skills_for_context(&always).ok()?;
+        let exclude: HashSet<String> = always.iter().cloned().collect();
+        let summary = loader.build_skills_summary(Some(&exclude)).ok()?;
+
+        let mut sections: Vec<String> = Vec::new();
+        if !always_blob.is_empty() {
+            sections.push(format!("# Active Skills\n\n{always_blob}"));
+        }
+        if !summary.is_empty() {
+            sections.push(format!(
+                "# Skills\n\n\
+                 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.\n\
+                 Unavailable skills need dependencies installed first — you can try installing them with apt/brew.\n\n\
+                 {summary}"
+            ));
+        }
+        if sections.is_empty() {
+            return None;
+        }
+        Some(ChatMessage::system(sections.join("\n\n---\n\n")))
     }
 
     /// Stateless one-shot. Retained for slice 1 callers.
@@ -274,7 +325,13 @@ impl AgentLoop {
 
         session.add_message(ChatRole::User, message);
         let history = session.get_history(self.history_window());
-        let initial_messages = history_to_chat_messages(&history);
+        let mut initial_messages = history_to_chat_messages(&history);
+        // Prepend a fresh skills system message every turn. Not
+        // persisted into the session — re-rendered from disk on the
+        // next turn so the model always sees current skills bodies.
+        if let Some(system_msg) = self.build_skills_system_message() {
+            initial_messages.insert(0, system_msg);
+        }
         let starting_len = initial_messages.len();
 
         let history_values: Vec<Value> =

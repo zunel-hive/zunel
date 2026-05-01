@@ -23,6 +23,7 @@ zunel-bus.workspace = true
 zunel-config.workspace = true
 zunel-mcp.workspace = true
 zunel-providers.workspace = true
+zunel-skills.workspace = true
 zunel-tokens.workspace = true
 zunel-tools.workspace = true
 zunel-util.workspace = true

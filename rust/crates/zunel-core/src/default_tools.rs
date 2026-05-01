@@ -62,120 +62,208 @@ pub async fn build_default_registry_async(cfg: &Config, workspace: &Path) -> Too
 
 async fn register_mcp_tools(registry: &mut ToolRegistry, cfg: &Config) {
     for (server_name, server) in &cfg.tools.mcp_servers {
-        let init_timeout = server.init_timeout.unwrap_or(10);
-        let tool_timeout = server.tool_timeout.unwrap_or(30);
-        let mut client: Box<dyn zunel_mcp::McpClient> = match mcp_transport(server) {
-            McpTransport::Stdio => {
-                let Some(command_raw) = server.command.as_deref() else {
-                    tracing::warn!(server = %server_name, "skipping stdio MCP server without command");
-                    continue;
-                };
-                let resolved_command = match resolve_stdio_command(command_raw) {
-                    Ok(cmd) => cmd,
-                    Err(err) => {
-                        tracing::warn!(
-                            server = %server_name,
-                            command = command_raw,
-                            error = %err,
-                            "failed to resolve stdio MCP command"
-                        );
-                        continue;
-                    }
-                };
-                let args = server.args.clone().unwrap_or_default();
-                let env = server.env.clone().unwrap_or_default();
-                match StdioMcpClient::connect(&resolved_command, &args, env, init_timeout).await {
-                    Ok(client) => Box::new(client),
-                    Err(err) => {
-                        tracing::warn!(server = %server_name, error = %err, "failed to initialize MCP server");
-                        continue;
-                    }
-                }
-            }
-            McpTransport::Remote(transport) => {
-                let Some(url) = server.url.as_deref() else {
-                    tracing::warn!(server = %server_name, "skipping remote MCP server without url");
-                    continue;
-                };
-                let mcp_oauth_state = remote_oauth_state(server_name, server).await;
-                if mcp_oauth_state.needs_login() {
-                    // OAuth-enabled, but the cached token can't be
-                    // brought back to life unattended. Register an
-                    // AUTH_REQUIRED stub so the agent has something
-                    // to call and the chat-driven login skill kicks
-                    // in instead of the server silently disappearing.
-                    register_auth_required_stub(
-                        registry,
-                        server_name,
-                        mcp_oauth_state.reason_tag(),
-                    );
-                    continue;
-                }
-                let headers = mcp_oauth_state.static_headers.clone();
-                let auth_provider = mcp_oauth_state.auth_provider.clone();
-                let oauth_enabled = mcp_oauth_state.oauth_enabled;
-                match RemoteMcpClient::connect_with_auth(
-                    url,
-                    headers,
-                    auth_provider,
-                    transport,
-                    init_timeout,
-                )
-                .await
-                {
-                    Ok(client) => Box::new(client),
-                    Err(err) => {
-                        tracing::warn!(server = %server_name, error = %err, "failed to initialize MCP server");
-                        if oauth_enabled {
-                            register_auth_required_stub(registry, server_name, "connect_failed");
-                        }
-                        continue;
-                    }
-                }
-            }
-            McpTransport::Unsupported(transport) => {
-                tracing::warn!(server = %server_name, transport, "skipping unsupported MCP transport");
-                continue;
-            }
-        };
-        let tools = match client.list_tools(tool_timeout).await {
-            Ok(tools) => tools,
-            Err(err) => {
-                tracing::warn!(server = %server_name, error = %err, "failed to list MCP tools");
-                if matches!(err, zunel_mcp::Error::Unauthorized { .. })
-                    && server
-                        .normalized_oauth()
-                        .map(|oauth| oauth.enabled)
-                        .unwrap_or(false)
-                {
-                    register_auth_required_stub(registry, server_name, "invalid_token");
-                }
-                continue;
-            }
-        };
-        let client = Arc::new(Mutex::new(client));
-        for tool in tools {
-            let wrapped_name = format!("mcp_{server_name}_{}", tool.name);
-            if !valid_tool_name(&wrapped_name) {
-                tracing::warn!(
-                    server = %server_name,
-                    tool = %tool.name,
-                    wrapped = %wrapped_name,
-                    "skipping MCP tool with invalid provider function name"
-                );
-                continue;
-            }
-            if !tool_enabled(server, &tool.name, &wrapped_name) {
-                continue;
-            }
-            registry.register(Arc::new(McpToolWrapper::new(
-                server_name,
-                tool,
-                Arc::clone(&client),
-                tool_timeout,
-            )));
-        }
+        register_one_mcp_server(registry, server_name, server).await;
     }
+
+    // Auto-register the built-in self stdio MCP server when the user
+    // hasn't pinned a `--server self` entry of their own and hasn't
+    // opted out via `ZUNEL_DISABLE_SELF_MCP`. Synthesizing here (vs.
+    // at config-load time) leaves `~/.zunel/config.json` untouched
+    // and lets `brew upgrade` pick up new self-MCP tools without
+    // users editing their config — important because `mcp_login_start`
+    // / `mcp_login_complete` ship with the binary, not the config.
+    if should_auto_register_self_mcp(cfg, &|key| std::env::var(key).ok()) {
+        let (name, server) = synthesize_self_mcp_server();
+        tracing::info!(
+            server = %name,
+            "auto-registering built-in self MCP server (set ZUNEL_DISABLE_SELF_MCP=1 to opt out)"
+        );
+        register_one_mcp_server(registry, &name, &server).await;
+    }
+}
+
+/// Decide whether `register_mcp_tools` should synthesize the
+/// `zunel_self` stdio MCP entry. Pulled out as a pure function so the
+/// gate is unit-testable without poking `register_mcp_tools` (which
+/// in turn would try to spawn a child process).
+fn should_auto_register_self_mcp(
+    cfg: &Config,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> bool {
+    if is_truthy_env(env_lookup("ZUNEL_DISABLE_SELF_MCP").as_deref()) {
+        return false;
+    }
+    !cfg.tools.mcp_servers.values().any(is_self_serve_entry)
+}
+
+/// Connect to one MCP server (stdio or remote) and register its
+/// tools. Extracted from the original `register_mcp_tools` loop body
+/// so the synthesized self-MCP entry takes the same path as
+/// user-configured ones — no behavior fork, no second copy of the
+/// auth-required-stub logic.
+async fn register_one_mcp_server(
+    registry: &mut ToolRegistry,
+    server_name: &str,
+    server: &McpServerConfig,
+) {
+    let init_timeout = server.init_timeout.unwrap_or(10);
+    let tool_timeout = server.tool_timeout.unwrap_or(30);
+    let mut client: Box<dyn zunel_mcp::McpClient> = match mcp_transport(server) {
+        McpTransport::Stdio => {
+            let Some(command_raw) = server.command.as_deref() else {
+                tracing::warn!(server = %server_name, "skipping stdio MCP server without command");
+                return;
+            };
+            let resolved_command = match resolve_stdio_command(command_raw) {
+                Ok(cmd) => cmd,
+                Err(err) => {
+                    tracing::warn!(
+                        server = %server_name,
+                        command = command_raw,
+                        error = %err,
+                        "failed to resolve stdio MCP command"
+                    );
+                    return;
+                }
+            };
+            let args = server.args.clone().unwrap_or_default();
+            let env = server.env.clone().unwrap_or_default();
+            match StdioMcpClient::connect(&resolved_command, &args, env, init_timeout).await {
+                Ok(client) => Box::new(client),
+                Err(err) => {
+                    tracing::warn!(server = %server_name, error = %err, "failed to initialize MCP server");
+                    return;
+                }
+            }
+        }
+        McpTransport::Remote(transport) => {
+            let Some(url) = server.url.as_deref() else {
+                tracing::warn!(server = %server_name, "skipping remote MCP server without url");
+                return;
+            };
+            let mcp_oauth_state = remote_oauth_state(server_name, server).await;
+            if mcp_oauth_state.needs_login() {
+                register_auth_required_stub(registry, server_name, mcp_oauth_state.reason_tag());
+                return;
+            }
+            let headers = mcp_oauth_state.static_headers.clone();
+            let auth_provider = mcp_oauth_state.auth_provider.clone();
+            let oauth_enabled = mcp_oauth_state.oauth_enabled;
+            match RemoteMcpClient::connect_with_auth(
+                url,
+                headers,
+                auth_provider,
+                transport,
+                init_timeout,
+            )
+            .await
+            {
+                Ok(client) => Box::new(client),
+                Err(err) => {
+                    tracing::warn!(server = %server_name, error = %err, "failed to initialize MCP server");
+                    if oauth_enabled {
+                        register_auth_required_stub(registry, server_name, "connect_failed");
+                    }
+                    return;
+                }
+            }
+        }
+        McpTransport::Unsupported(transport) => {
+            tracing::warn!(server = %server_name, transport, "skipping unsupported MCP transport");
+            return;
+        }
+    };
+    let tools = match client.list_tools(tool_timeout).await {
+        Ok(tools) => tools,
+        Err(err) => {
+            tracing::warn!(server = %server_name, error = %err, "failed to list MCP tools");
+            if matches!(err, zunel_mcp::Error::Unauthorized { .. })
+                && server
+                    .normalized_oauth()
+                    .map(|oauth| oauth.enabled)
+                    .unwrap_or(false)
+            {
+                register_auth_required_stub(registry, server_name, "invalid_token");
+            }
+            return;
+        }
+    };
+    let client = Arc::new(Mutex::new(client));
+    for tool in tools {
+        let wrapped_name = format!("mcp_{server_name}_{}", tool.name);
+        if !valid_tool_name(&wrapped_name) {
+            tracing::warn!(
+                server = %server_name,
+                tool = %tool.name,
+                wrapped = %wrapped_name,
+                "skipping MCP tool with invalid provider function name"
+            );
+            continue;
+        }
+        if !tool_enabled(server, &tool.name, &wrapped_name) {
+            continue;
+        }
+        registry.register(Arc::new(McpToolWrapper::new(
+            server_name,
+            tool,
+            Arc::clone(&client),
+            tool_timeout,
+        )));
+    }
+}
+
+/// Synthesize the auto-registered self-MCP entry consumed by
+/// `register_mcp_tools` when the user hasn't pinned a `--server self`
+/// entry of their own. Spawns `<current_exe> mcp serve --server self`
+/// — the `"self"` command sentinel resolves via [`resolve_stdio_command`]
+/// at connect time, so this works under brew, deb, and `cargo install`
+/// without hardcoding any prefix.
+fn synthesize_self_mcp_server() -> (String, McpServerConfig) {
+    let server = McpServerConfig {
+        transport_type: Some("stdio".into()),
+        command: Some("self".into()),
+        args: Some(vec![
+            "mcp".into(),
+            "serve".into(),
+            "--server".into(),
+            "self".into(),
+        ]),
+        init_timeout: Some(15),
+        tool_timeout: Some(30),
+        ..Default::default()
+    };
+    ("zunel_self".into(), server)
+}
+
+/// Detect when an operator-supplied MCP entry is already serving
+/// `--server self`, regardless of the JSON key name they used. We
+/// look at args (not the server name) because users name their
+/// entries however they want. Detection: any arg `self` immediately
+/// preceded by `--server`.
+fn is_self_serve_entry(server: &McpServerConfig) -> bool {
+    let Some(args) = server.args.as_deref() else {
+        return false;
+    };
+    let mut prev: Option<&str> = None;
+    for arg in args {
+        if prev == Some("--server") && arg == "self" {
+            return true;
+        }
+        prev = Some(arg.as_str());
+    }
+    false
+}
+
+/// Cheap env truthiness check, kept local to `default_tools.rs` so
+/// this module doesn't take a fresh dependency on `zunel-cli`'s
+/// `env_disabled` (which lives in `gateway.rs` for unrelated
+/// reasons). Accepts pre-fetched values via `&str` so tests can
+/// exercise the matcher without touching the process env table.
+fn is_truthy_env(value: Option<&str>) -> bool {
+    matches!(
+        value,
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn register_auth_required_stub(registry: &mut ToolRegistry, server_name: &str, reason: &str) {
@@ -907,5 +995,166 @@ mod tests {
             refresh_outcome: Some(NotCached),
         };
         assert!(!disabled.needs_login());
+    }
+
+    /// `synthesize_self_mcp_server()` is the single source of truth
+    /// for the auto-registered entry's transport + args. If anyone
+    /// changes them we want this test to fail loudly because the
+    /// matching `is_self_serve_entry` detection logic depends on
+    /// `--server self` appearing back-to-back in args.
+    #[test]
+    fn synthesize_self_mcp_server_returns_stdio_entry_serving_self() {
+        let (name, server) = synthesize_self_mcp_server();
+        assert_eq!(name, "zunel_self");
+        assert_eq!(server.transport_type.as_deref(), Some("stdio"));
+        assert_eq!(server.command.as_deref(), Some("self"));
+        assert_eq!(
+            server.args.as_deref(),
+            Some(&["mcp", "serve", "--server", "self"][..])
+                .map(|s| s.iter().map(|x| x.to_string()).collect::<Vec<_>>())
+                .as_deref()
+        );
+        // Synthesized entry must round-trip through detection so a
+        // user copying the auto-registered config into their own
+        // file won't end up with two `zunel_self` stubs.
+        assert!(is_self_serve_entry(&server));
+    }
+
+    #[test]
+    fn is_self_serve_entry_recognises_dash_dash_server_self() {
+        let s = McpServerConfig {
+            args: Some(vec![
+                "mcp".into(),
+                "serve".into(),
+                "--server".into(),
+                "self".into(),
+            ]),
+            ..Default::default()
+        };
+        assert!(is_self_serve_entry(&s));
+    }
+
+    #[test]
+    fn is_self_serve_entry_rejects_non_self_servers() {
+        let slack = McpServerConfig {
+            args: Some(vec![
+                "mcp".into(),
+                "serve".into(),
+                "--server".into(),
+                "slack".into(),
+            ]),
+            ..Default::default()
+        };
+        assert!(!is_self_serve_entry(&slack));
+
+        let empty = McpServerConfig {
+            args: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(!is_self_serve_entry(&empty));
+
+        let none = McpServerConfig::default();
+        assert!(!is_self_serve_entry(&none));
+    }
+
+    #[test]
+    fn is_self_serve_entry_rejects_self_without_dash_dash_server_prefix() {
+        // Bare `self` not preceded by `--server` is not a self-serve
+        // invocation. Important because the script-binary auto-resolve
+        // sentinel is `command: "self"`, not an args-level value.
+        let spurious = McpServerConfig {
+            args: Some(vec!["self".into(), "--banana".into()]),
+            ..Default::default()
+        };
+        assert!(!is_self_serve_entry(&spurious));
+    }
+
+    #[test]
+    fn is_truthy_env_recognises_documented_truthy_values() {
+        for v in ["1", "true", "TRUE", "yes", "YES"] {
+            assert!(is_truthy_env(Some(v)), "expected truthy: {v}");
+        }
+        for v in ["", "0", "false", "FALSE", "no", "yEs", "True"] {
+            assert!(!is_truthy_env(Some(v)), "expected falsy: {v}");
+        }
+        assert!(!is_truthy_env(None));
+    }
+
+    fn lookup_pairs<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    fn cfg_with_no_mcp_servers() -> Config {
+        let raw = json!({
+            "providers": {},
+            "agents": {"defaults": {"model": "m"}},
+            "tools": {"mcpServers": {}}
+        });
+        serde_json::from_value(raw).unwrap()
+    }
+
+    fn cfg_with_user_self_mcp() -> Config {
+        // User hand-wired their own `--server self` under a custom
+        // server name. We must NOT auto-register a second one.
+        let raw = json!({
+            "providers": {},
+            "agents": {"defaults": {"model": "m"}},
+            "tools": {"mcpServers": {
+                "my_zunel_self": {
+                    "type": "stdio",
+                    "command": "zunel",
+                    "args": ["mcp", "serve", "--server", "self"]
+                }
+            }}
+        });
+        serde_json::from_value(raw).unwrap()
+    }
+
+    #[test]
+    fn auto_register_gate_synthesizes_for_empty_config() {
+        let cfg = cfg_with_no_mcp_servers();
+        assert!(should_auto_register_self_mcp(&cfg, &lookup_pairs(&[])));
+    }
+
+    #[test]
+    fn auto_register_gate_skips_when_disable_env_set() {
+        let cfg = cfg_with_no_mcp_servers();
+        for v in ["1", "true", "TRUE", "yes", "YES"] {
+            assert!(
+                !should_auto_register_self_mcp(
+                    &cfg,
+                    &lookup_pairs(&[("ZUNEL_DISABLE_SELF_MCP", v)]),
+                ),
+                "expected ZUNEL_DISABLE_SELF_MCP={v} to suppress auto-reg",
+            );
+        }
+    }
+
+    #[test]
+    fn auto_register_gate_skips_when_user_already_serves_self() {
+        let cfg = cfg_with_user_self_mcp();
+        assert!(!should_auto_register_self_mcp(&cfg, &lookup_pairs(&[])));
+    }
+
+    #[test]
+    fn auto_register_gate_synthesizes_when_user_has_unrelated_mcp_only() {
+        let raw = json!({
+            "providers": {},
+            "agents": {"defaults": {"model": "m"}},
+            "tools": {"mcpServers": {
+                "atlassian-jira": {
+                    "type": "streamableHttp",
+                    "url": "https://example.test/mcp",
+                    "oauth": {"enabled": true}
+                }
+            }}
+        });
+        let cfg: Config = serde_json::from_value(raw).unwrap();
+        assert!(should_auto_register_self_mcp(&cfg, &lookup_pairs(&[])));
     }
 }

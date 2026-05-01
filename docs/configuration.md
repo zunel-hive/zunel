@@ -768,6 +768,33 @@ agent's signal that a server has no usable token (cold start, refresh failure,
 or a 401 mid-conversation) — see the auto-prompt section below for the
 runtime side.
 
+#### Auto-registered self MCP server
+
+For the chat-driven login flow above to actually work, the agent needs the
+`mcp_login_start` / `mcp_login_complete` tools registered in its tool registry.
+Starting with v0.2.8, `zunel gateway` and `zunel agent` both auto-register the
+built-in self stdio MCP server under the synthetic name `zunel_self`
+(equivalent to a `~/.zunel/config.json` entry with `command: "self"`,
+`args: ["mcp", "serve", "--server", "self"]`) when the user hasn't pinned a
+`--server self` entry of their own. The auto-registered entry uses the same
+binary already running the gateway/agent — no PATH lookup, no Homebrew prefix
+guessing.
+
+Skip the auto-registration when:
+
+- You already wired a `--server self` entry in your config under any name —
+  detection looks at args (`--server self`), not the JSON key. Your entry
+  wins; auto-registration steps aside.
+- You set `ZUNEL_DISABLE_SELF_MCP=1` (or `true` / `yes`) in the gateway
+  environment. Useful when you deliberately want the agent to run without the
+  self MCP — e.g., a hardened deployment that ships a stripped tool registry.
+
+The auto-registered entry exposes the same tools as a hand-wired one
+(`zunel_self_status`, `mcp_login_start`, `mcp_login_complete`,
+`zunel_sessions_list`, the Slack capability tool, etc.). Operators who want to
+override its `init_timeout` / `tool_timeout` should pin their own entry rather
+than rely on the auto-registered defaults (15s / 30s).
+
 #### `MCP_AUTH_REQUIRED:` error contract
 
 Whenever an OAuth-enabled remote MCP server cannot authenticate, every tool

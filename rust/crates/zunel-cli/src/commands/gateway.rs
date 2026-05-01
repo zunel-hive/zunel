@@ -441,10 +441,16 @@ async fn build_gateway_agent_loop(
         },
     ))));
 
+    // Load skills from `<workspace>/skills/` plus the binary-bundled
+    // builtins (e.g. `mcp-oauth-login`). User skills win on name
+    // collisions; embedded builtins fill in otherwise.
+    let skills = zunel_skills::SkillsLoader::new(&workspace, None, &[]);
+
     Ok(
         AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions)
             .with_tools(registry)
             .with_workspace(workspace)
+            .with_skills(skills)
             .with_approval_required(cfg.tools.approval_required)
             .with_approval_scope(parse_approval_scope(&cfg.tools.approval_scope))
             .with_show_token_footer(cfg.channels.show_token_footer),
