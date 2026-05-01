@@ -159,3 +159,92 @@ To keep the user service running after logout:
 ```bash
 loginctl enable-linger $USER
 ```
+
+## macOS Service (Homebrew)
+
+For a persistent Slack gateway on macOS, the simplest path is
+`brew services`. The published Homebrew formula at
+[`zunel-hive/homebrew-tap`](https://github.com/zunel-hive/homebrew-tap)
+already declares a `service` block that runs `zunel gateway` with
+`keep_alive true`, so all you need is:
+
+```bash
+brew tap zunel-hive/tap
+brew install zunel
+brew services start zunel-hive/tap/zunel
+```
+
+Common operations:
+
+```bash
+brew services list                                   # status
+brew services restart zunel-hive/tap/zunel
+brew services stop zunel-hive/tap/zunel
+tail -f /opt/homebrew/var/log/zunel-gateway.{out,err}.log
+```
+
+### Slack bot token rotation: handled in-runtime
+
+If you've enabled bot-token rotation on your Slack app
+(`<zunel_home>/slack-app/app_info.json` exists with
+`bot_refresh_token` and `bot_token_expires_at` populated), the gateway
+runtime spawns a background task that refreshes the rotating bot
+token whenever it has less than 30 minutes of life left. The check
+runs at gateway startup and then every 30 minutes for the lifetime of
+the process. Refresh failures are logged at `WARN` and never crash
+the gateway.
+
+This means **no external wrapper script is required for bot rotation**:
+`brew services start zunel` is enough. The runtime calls exactly the
+same code path `zunel slack refresh-bot --if-near-expiry 1800` does.
+
+You can still invoke `zunel slack refresh-bot` from the shell or a
+launchd / systemd timer if you prefer eager refreshes outside the
+30-minute window.
+
+Tunables (env vars on the gateway process):
+
+| Env var                          | Default | Meaning                                      |
+| -------------------------------- | ------- | -------------------------------------------- |
+| `ZUNEL_BOT_REFRESH_TICK_SECS`    | `1800`  | How often the in-runtime task wakes up       |
+| `ZUNEL_BOT_REFRESH_WINDOW_SECS`  | `1800`  | Refresh when token has less than this many seconds left |
+
+Users without bot rotation (no `slack-app/app_info.json` on disk) pay
+no cost — the task simply doesn't spawn.
+
+### Custom LaunchAgent (advanced)
+
+You can still hand-roll a `~/Library/LaunchAgents/com.zunel.gateway.plist`
+LaunchAgent if you need finer control (different `RUST_LOG`, custom
+log paths outside `/opt/homebrew/var/log`, etc.). The minimum plist
+mirrors what `brew services` generates:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>            <string>com.zunel.gateway</string>
+  <key>ProgramArguments</key> <array><string>/opt/homebrew/bin/zunel</string><string>gateway</string></array>
+  <key>RunAtLoad</key>        <true/>
+  <key>KeepAlive</key>        <dict><key>Crashed</key><true/><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key> <integer>30</integer>
+  <key>StandardOutPath</key>  <string>/Users/you/.zunel/logs/gateway.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/you/.zunel/logs/gateway.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RUST_LOG</key> <string>info,zunel=info</string>
+  </dict>
+  <key>ProcessType</key>      <string>Background</string>
+</dict>
+</plist>
+```
+
+Bot-token rotation is still handled by the in-runtime task above — you
+don't need an external `zunel slack refresh-bot` wrapper script or a
+periodic kicker LaunchAgent. (Older deployments that pre-date the
+in-runtime refresh shipped both; they keep working but are now
+redundant.)
+
+Don't run both `brew services start zunel` and a custom LaunchAgent
+against the same `~/.zunel/` workspace: two `zunel gateway`
+processes will race over Slack Socket connections and session writes.

@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
+use zunel_channels::slack::bot_refresh::{
+    refresh_bot_if_near_expiry, RefreshContext, RefreshOutcome,
+};
 
 use crate::cli::{SlackArgs, SlackCommand, SlackLoginArgs, SlackPostArgs, SlackRefreshBotArgs};
 use crate::oauth_callback::{bind_callback_server, open_browser};
@@ -506,223 +509,68 @@ fn current_epoch_nanos() -> u64 {
         .unwrap_or(0)
 }
 
-/// Refresh the gateway-side rotating Slack bot token. Reads the current
-/// `bot_refresh_token` (and `client_id` / `client_secret`) from
-/// `<zunel_home>/slack-app/app_info.json`, runs the `refresh_token` grant
-/// against `oauth.v2.access`, and writes the new credentials back to that
-/// file plus `channels.slack.botToken` in `config.json`.
+/// CLI wrapper around
+/// [`zunel_channels::slack::bot_refresh::refresh_bot_if_near_expiry`].
 ///
-/// Designed to be safe to call on every gateway start: when
-/// `--if-near-expiry SECS` is passed and the cached token still has more
-/// than `SECS` of life left, the function returns `Ok(())` without
-/// touching Slack or the filesystem.
+/// All the actual state-transition lives in the library now (so the
+/// long-running `zunel gateway` process can call exactly the same code
+/// path on a periodic timer). This function is responsible only for
+/// resolving the on-disk paths from `zunel-config`, mapping the typed
+/// `RefreshError` to `anyhow::Result` at the binary edge, and printing
+/// the human/JSON one-liner the existing `slack_cli_test.rs` integration
+/// suite asserts on.
 async fn refresh_bot(args: SlackRefreshBotArgs, config_path: Option<&Path>) -> Result<()> {
-    let info_path = bot_app_info_path()?;
     let cfg_path = match config_path {
         Some(path) => path.to_path_buf(),
         None => zunel_config::default_config_path()?,
     };
-
-    if !info_path.exists() {
-        return Err(anyhow!(
-            "{} not found. The gateway-side Slack app must be installed first.",
-            info_path.display()
-        ));
-    }
-    let app_info: Value = serde_json::from_str(
-        &std::fs::read_to_string(&info_path)
-            .with_context(|| format!("reading {}", info_path.display()))?,
-    )
-    .with_context(|| format!("parsing {}", info_path.display()))?;
-
-    let cached_exp = app_info
-        .get("bot_token_expires_at")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let secs_until_exp = cached_exp - current_epoch_secs();
-
-    if let Some(window) = args.if_near_expiry {
-        if secs_until_exp > window {
-            print_refresh_outcome(
-                &args,
-                true,
-                json!({
-                    "skipped": true,
-                    "reason": "token_still_valid",
-                    "secs_until_exp": secs_until_exp,
-                    "expires_at": cached_exp,
-                }),
-            );
-            return Ok(());
-        }
-    }
-
-    let client_id = required_string_field(&app_info, "client_id", &info_path)?;
-    let client_secret = required_string_field(&app_info, "client_secret", &info_path)?;
-    let refresh_token = required_string_field(&app_info, "bot_refresh_token", &info_path)?;
-
-    let response = exchange_refresh_token(&client_id, &client_secret, &refresh_token).await?;
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        let err = response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        return Err(anyhow!("Slack oauth.v2.access returned error: {err}"));
-    }
-
-    let new_bot = required_response_string(&response, "access_token")?;
-    let new_refresh = required_response_string(&response, "refresh_token")?;
-    let expires_in = response
-        .get("expires_in")
-        .and_then(Value::as_i64)
-        .filter(|secs| *secs > 0)
-        .ok_or_else(|| anyhow!("Slack oauth.v2.access response missing expires_in"))?;
-    let new_exp = current_epoch_secs() + expires_in;
-
-    update_bot_app_info(&info_path, &new_bot, &new_refresh, new_exp)
-        .with_context(|| format!("updating {}", info_path.display()))?;
-    update_config_bot_token(&cfg_path, &new_bot)
-        .with_context(|| format!("updating {}", cfg_path.display()))?;
-
-    print_refresh_outcome(
-        &args,
-        false,
-        json!({
-            "skipped": false,
-            "expires_at": new_exp,
-            "expires_in": expires_in,
-        }),
-    );
+    let home = zunel_config::zunel_home()?;
+    let ctx = RefreshContext::from_zunel_home(&home, cfg_path);
+    let outcome = refresh_bot_if_near_expiry(&ctx, args.if_near_expiry)
+        .await
+        .with_context(|| "refreshing slack bot token")?;
+    print_refresh_outcome(&args, &outcome);
     Ok(())
 }
 
-fn bot_app_info_path() -> Result<PathBuf> {
-    Ok(zunel_config::zunel_home()?
-        .join("slack-app")
-        .join("app_info.json"))
-}
-
-async fn exchange_refresh_token(
-    client_id: &str,
-    client_secret: &str,
-    refresh_token: &str,
-) -> Result<Value> {
-    let base = std::env::var("SLACK_API_BASE").unwrap_or_else(|_| "https://slack.com".into());
-    reqwest::Client::new()
-        .post(format!(
-            "{}/api/oauth.v2.access",
-            base.trim_end_matches('/')
-        ))
-        .form(&[
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-        ])
-        .send()
-        .await
-        .context("Slack oauth.v2.access failed")?
-        .error_for_status()
-        .context("Slack oauth.v2.access failed")?
-        .json::<Value>()
-        .await
-        .context("decoding Slack oauth.v2.access response")
-}
-
-fn update_bot_app_info(path: &Path, bot: &str, refresh: &str, exp: i64) -> Result<()> {
-    let mut value: Value = serde_json::from_str(
-        &std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
-    )
-    .with_context(|| format!("parsing {}", path.display()))?;
-    let obj = value
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("{} is not a JSON object", path.display()))?;
-    obj.insert("bot_token".into(), json!(bot));
-    obj.insert("bot_refresh_token".into(), json!(refresh));
-    obj.insert("bot_token_expires_at".into(), json!(exp));
-    write_json_preserving_parent_perms(path, &value)
-}
-
-fn update_config_bot_token(path: &Path, bot: &str) -> Result<()> {
-    let mut value: Value = serde_json::from_str(
-        &std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
-    )
-    .with_context(|| format!("parsing {}", path.display()))?;
-    let slack = value
-        .pointer_mut("/channels/slack")
-        .ok_or_else(|| anyhow!("{} has no channels.slack object", path.display()))?
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("{} channels.slack is not an object", path.display()))?;
-    slack.insert("botToken".into(), json!(bot));
-    write_json_preserving_parent_perms(path, &value)
-}
-
-/// Atomic JSON write that locks the resulting file to 0600 but, unlike
-/// `atomic_write_json`, does not chmod the parent directory. We use this
-/// for files (notably `~/.zunel/config.json`) whose parent we don't own
-/// the permissions policy for.
-fn write_json_preserving_parent_perms(path: &Path, payload: &Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(payload)?)
-        .with_context(|| format!("writing temp file {}", tmp.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
-}
-
-fn required_string_field(value: &Value, key: &str, path: &Path) -> Result<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("{} missing required field `{}`", path.display(), key))
-}
-
-fn required_response_string(value: &Value, key: &str) -> Result<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("Slack oauth.v2.access response missing `{}`", key))
-}
-
-fn print_refresh_outcome(args: &SlackRefreshBotArgs, skipped: bool, mut payload: Value) {
-    if let Some(obj) = payload.as_object_mut() {
-        obj.insert("ok".to_string(), Value::Bool(true));
-    }
+fn print_refresh_outcome(args: &SlackRefreshBotArgs, outcome: &RefreshOutcome) {
     if args.json {
+        let payload = match outcome {
+            RefreshOutcome::Skipped {
+                secs_until_exp,
+                expires_at,
+            } => json!({
+                "ok": true,
+                "skipped": true,
+                "reason": "token_still_valid",
+                "secs_until_exp": secs_until_exp,
+                "expires_at": expires_at,
+            }),
+            RefreshOutcome::Refreshed {
+                expires_at,
+                expires_in,
+            } => json!({
+                "ok": true,
+                "skipped": false,
+                "expires_at": expires_at,
+                "expires_in": expires_in,
+            }),
+        };
         println!(
             "{}",
             serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
         );
         return;
     }
-    if skipped {
-        let secs = payload
-            .get("secs_until_exp")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        println!("ok skipped: bot token still valid for {secs}s");
-    } else {
-        let new_exp = payload
-            .get("expires_at")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        let exp_in = payload
-            .get("expires_in")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        println!("ok refreshed: new expires_at={new_exp} (in {exp_in}s)");
+    match outcome {
+        RefreshOutcome::Skipped { secs_until_exp, .. } => {
+            println!("ok skipped: bot token still valid for {secs_until_exp}s");
+        }
+        RefreshOutcome::Refreshed {
+            expires_at,
+            expires_in,
+        } => {
+            println!("ok refreshed: new expires_at={expires_at} (in {expires_in}s)");
+        }
     }
 }

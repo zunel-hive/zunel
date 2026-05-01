@@ -13,6 +13,7 @@
 //! `connected` flag without a separate plumbing struct.
 
 mod api;
+pub mod bot_refresh;
 mod inbound;
 
 use std::sync::Arc;
