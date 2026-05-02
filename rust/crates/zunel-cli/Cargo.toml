@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Rust CLI and gateway for the Zunel personal AI assistant."
-homepage = "https://github.com/zunel-hive/zunel-binaries"
+homepage = "https://github.com/zunel-hive/homebrew-tap"
 
 [[bin]]
 name = "zunel"

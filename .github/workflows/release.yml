@@ -303,21 +303,24 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
-  # Re-publish every per-target tarball + the auto-generated Homebrew
-  # formula to the public `zunel-hive/zunel-binaries` repo so users can
-  # `brew install zunel` (formula URLs reference this repo via the
-  # `repository` field in `rust/Cargo.toml`) and `dpkg -i` even when
-  # the source repo is private. Authenticated via the `BINARIES_TOKEN`
-  # secret (fine-grained PAT scoped to `zunel-hive/zunel-binaries` with
+  # Re-publish every per-target tarball to the public
+  # `zunel-hive/homebrew-tap` repo so users can `brew install zunel`
+  # (formula URLs reference this repo via the `repository` field in
+  # `rust/Cargo.toml`) and `dpkg -i` even when the source repo is
+  # private. The tap repo doubles as the public binary host: the
+  # `Formula/zunel.rb` file lives in git there, and every release's
+  # tarballs (+ `.deb`s from `deb.yml`) live as GitHub Release assets
+  # on the same repo. Authenticated via the `HOMEBREW_TAP_TOKEN` secret
+  # (fine-grained PAT scoped to `zunel-hive/homebrew-tap` with
   # Contents: Read+Write). See `docs/release.md`.
-  mirror-to-binaries:
+  mirror-to-tap:
     needs:
       - plan
       - host
     if: ${{ always() && needs.host.result == 'success' && needs.plan.outputs.publishing == 'true' }}
     runs-on: "ubuntu-22.04"
     env:
-      GH_TOKEN: ${{ secrets.BINARIES_TOKEN }}
+      GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - name: Fetch artifacts
         uses: actions/download-artifact@v7
@@ -327,7 +330,7 @@ jobs:
           merge-multiple: true
       - name: Cleanup granular manifests
         run: rm -f artifacts/*-dist-manifest.json
-      - name: Mirror release to zunel-hive/zunel-binaries
+      - name: Mirror release to zunel-hive/homebrew-tap
         env:
           PRERELEASE_FLAG: "${{ fromJson(needs.host.outputs.val).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(needs.host.outputs.val).announcement_title }}"
@@ -335,14 +338,14 @@ jobs:
         run: |
           set -euo pipefail
           echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
-          # No `--target`: the binaries repo doesn't share commits with
-          # the source, so the release is tagged against the default
-          # branch HEAD of zunel-hive/zunel-binaries. The tag itself
-          # (e.g. v0.3.0) only needs to exist on the binaries side for
-          # the release to be reachable; users go through the formula
-          # URLs which embed the tag directly.
+          # No `--target`: the tap repo doesn't share commits with the
+          # source, so the release is tagged against the default branch
+          # HEAD of zunel-hive/homebrew-tap. The tag itself (e.g.
+          # v0.3.0) only needs to exist on the tap side for the release
+          # to be reachable; users go through the formula URLs which
+          # embed the tag directly.
           gh release create "${{ needs.plan.outputs.tag }}" \
-            --repo zunel-hive/zunel-binaries \
+            --repo zunel-hive/homebrew-tap \
             $PRERELEASE_FLAG \
             --title "$ANNOUNCEMENT_TITLE" \
             --notes-file "$RUNNER_TEMP/notes.txt" \
@@ -352,7 +355,7 @@ jobs:
     needs:
       - plan
       - host
-      - mirror-to-binaries
+      - mirror-to-tap
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -457,12 +460,12 @@ jobs:
     needs:
       - plan
       - host
-      - mirror-to-binaries
+      - mirror-to-tap
       - publish-homebrew-formula
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.mirror-to-binaries.result == 'skipped' || needs.mirror-to-binaries.result == 'success') && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
+    if: ${{ always() && needs.host.result == 'success' && (needs.mirror-to-tap.result == 'skipped' || needs.mirror-to-tap.result == 'success') && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

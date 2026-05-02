@@ -25,8 +25,8 @@ version = "0.2.11"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"
-repository = "https://github.com/zunel-hive/zunel-binaries"
-homepage = "https://github.com/zunel-hive/zunel-binaries"
+repository = "https://github.com/zunel-hive/homebrew-tap"
+homepage = "https://github.com/zunel-hive/homebrew-tap"
 description = "Rust personal AI assistant with CLI, Slack gateway, and MCP tools."
 authors = ["zunel contributors"]
 
@@ -147,11 +147,16 @@ install-updater = false
 # re-apply the workspace-in-subdir patches via `git diff` against the
 # previous release.yml.
 allow-dirty = ["ci"]
-# Personal Homebrew tap to publish the auto-generated formula into. cargo-dist
-# pushes `Formula/zunel.rb` (referencing the per-target tarballs uploaded to
-# the GitHub Release) on every successful tag build, so users on macOS/Linux
-# can install with `brew tap zunel-hive/tap && brew install zunel`. Requires a
-# `HOMEBREW_TAP_TOKEN` GitHub Actions secret on the source repo: a fine-
-# grained PAT with `contents:write` on the tap repo.
+# Personal Homebrew tap to publish the auto-generated formula into. The tap
+# repo doubles as the public binary host: every release's per-target tarballs
+# (and `.deb`s from `deb.yml`) are uploaded to a GitHub Release on the same
+# `zunel-hive/homebrew-tap` repo, and the formula's download URLs reference
+# that release (because cargo-dist derives them from
+# `[workspace.package].repository` above, which we point at the tap repo).
+# Users get `brew tap zunel-hive/tap && brew install zunel` and `dpkg -i`
+# against a single public repo. Requires a `HOMEBREW_TAP_TOKEN` GitHub
+# Actions secret on the source repo: a fine-grained PAT with
+# `contents:write` on the tap repo (used by both the formula bump and the
+# release-asset mirror in `.github/workflows/release.yml` + `deb.yml`).
 tap = "zunel-hive/homebrew-tap"
 publish-jobs = ["homebrew"]

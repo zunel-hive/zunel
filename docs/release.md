@@ -1,27 +1,32 @@
 # Release process
 
 This page documents how to cut a `zunel` release that simultaneously
-publishes to GitHub Releases, the public binary mirror repo, the
-Homebrew tap, and as `.deb` artifacts for Debian/Ubuntu. It also
-covers the one-time setup steps that live outside this repo (creating
-the binaries/tap repos, minting the PATs) and the future GH-Pages apt
-repo work.
+publishes to GitHub Releases, the Homebrew tap, and as `.deb`
+artifacts for Debian/Ubuntu. It also covers the one-time setup steps
+that live outside this repo (creating the tap repo, minting the PAT)
+and the future GH-Pages apt repo work.
 
 ## Architecture
 
-Three GitHub repos are involved:
+Two GitHub repos are involved:
 
 | Repo                          | Visibility | Purpose                                                                |
 | ----------------------------- | ---------- | ---------------------------------------------------------------------- |
 | `zunel-hive/zunel`            | private    | Source code. CI runs here; private GitHub Releases land here too.      |
-| `zunel-hive/zunel-binaries`   | public     | Public mirror of every release's tarballs + `.deb`s. Formula URLs and `dpkg` install instructions point here. |
-| `zunel-hive/homebrew-tap`     | public     | Auto-managed `Formula/zunel.rb`. `brew tap zunel-hive/tap` reads from here. |
+| `zunel-hive/homebrew-tap`     | public     | Doubles as **(a)** the Homebrew tap (`Formula/zunel.rb` lives in git here, served by `brew tap zunel-hive/tap`) and **(b)** the public binary host: every release's per-arch tarballs and `.deb`s are uploaded as GitHub Release assets on this repo. Formula download URLs and `dpkg` install instructions both point here. |
 
 Keeping the source private while serving binaries publicly works
 because: the auto-generated `Formula/zunel.rb` and the `.deb` install
-URLs both reference `zunel-hive/zunel-binaries` (driven by
+URLs both reference `zunel-hive/homebrew-tap` (driven by
 `rust/Cargo.toml → [workspace.package].repository`), which is public.
 The source repo's own GitHub Releases only matter to maintainers.
+
+> **Migration note (May 2026):** earlier releases used a separate
+> `zunel-hive/zunel-binaries` repo for binary hosting. That repo has
+> been retired; everything now lives on `zunel-hive/homebrew-tap`. Old
+> install commands that hit `zunel-hive/zunel-binaries` will 404. The
+> `BINARIES_TOKEN` secret on the source repo is no longer used and
+> can be deleted.
 
 ## Overview
 
@@ -34,24 +39,23 @@ Two CI workflows live in `zunel-hive/zunel`:
   1. `plan/build-local-artifacts/build-global-artifacts/host` — builds
      per-target tarballs, opens a GitHub Release on the source repo
      with the tarballs and the `.rb` formula attached.
-  2. `mirror-to-binaries` — downloads every artifact from the workflow
-     run and creates a parallel GitHub Release on
-     `zunel-hive/zunel-binaries` with the same tag/title/notes/assets.
-     Authenticated via the `BINARIES_TOKEN` secret. Without this step
-     the formula URLs would 404 to non-collaborators.
+  2. `mirror-to-tap` — downloads every artifact from the workflow run
+     and creates a parallel GitHub Release on
+     `zunel-hive/homebrew-tap` with the same tag/title/notes/assets.
+     Authenticated via the `HOMEBREW_TAP_TOKEN` secret. Without this
+     step the formula URLs would 404 to non-collaborators.
   3. `publish-homebrew-formula` — pushes `Formula/zunel.rb` to
-     `zunel-hive/homebrew-tap` (using `HOMEBREW_TAP_TOKEN`). The
-     formula URLs already point at `zunel-hive/zunel-binaries`
+     `zunel-hive/homebrew-tap` (using the same `HOMEBREW_TAP_TOKEN`).
+     The formula URLs already point at `zunel-hive/homebrew-tap`
      because cargo-dist derives them from
      `[workspace.package].repository`.
   4. `announce` — finalizes the source-side GitHub Release.
 - `.github/workflows/deb.yml` — fires on `workflow_run: ["Release"] /
-  completed`, downloads the per-arch musl tarballs from
-  `zunel-hive/zunel-binaries` (the public mirror — the source
-  release is private), runs `cargo-deb` against the already-stripped
-  binaries, and uploads the resulting `.deb`s back to the
-  `zunel-hive/zunel-binaries` release. Authenticated via
-  `BINARIES_TOKEN`. (We listen on `workflow_run` instead of
+  completed`, downloads the per-arch musl tarballs from the tap
+  repo's release (the source release is private), runs `cargo-deb`
+  against the already-stripped binaries, and uploads the resulting
+  `.deb`s back to the same tap-repo release. Authenticated via
+  `HOMEBREW_TAP_TOKEN`. (We listen on `workflow_run` instead of
   `release: published` because GitHub Actions intentionally suppresses
   `release.published` when the release is created by a workflow using
   `GITHUB_TOKEN` — which `Release > host` does. The job has a
@@ -76,38 +80,31 @@ Homebrew formula.
 These steps live outside this repo and have to be done by the
 maintainer with a GitHub session signed in as `zunel-hive`.
 
-1. **Create the public binary mirror repo.** Create an empty public
-   repo named **`zunel-hive/zunel-binaries`** with an initial README
+1. **Create the public Homebrew tap repo.** Create an empty public
+   repo named **`zunel-hive/homebrew-tap`** with an initial README
    commit (so it has a default branch — `gh repo create
-   zunel-hive/zunel-binaries --public --add-readme` does both). Every
-   release's tarballs + `.deb`s land here; this is what users
-   download from. No source code lives here.
+   zunel-hive/homebrew-tap --public --add-readme` does both). The
+   `homebrew-` prefix is mandatory: Homebrew matches it when a user
+   runs `brew tap zunel-hive/tap`. The tap name is already pinned in
+   `rust/Cargo.toml → [workspace.metadata.dist].tap`. cargo-dist will
+   commit `Formula/zunel.rb` on the first release; every release's
+   tarballs + `.deb`s land here as GitHub Release assets too.
 
-2. **Create the public Homebrew tap repo.** Create an empty public
-   repo named **`zunel-hive/homebrew-tap`** (the `homebrew-` prefix
-   is mandatory — Homebrew matches it when a user runs `brew tap
-   zunel-hive/tap`). No README needed; cargo-dist will commit
-   `Formula/zunel.rb` on the first release. The tap name is already
-   pinned in `rust/Cargo.toml → [workspace.metadata.dist].tap`.
+2. **Mint a fine-grained PAT for the tap repo.** GitHub → Settings →
+   Developer settings → Personal access tokens → Fine-grained tokens
+   → Generate new token. Limit it to `zunel-hive/homebrew-tap`, grant
+   **Contents: Read and write**, leave everything else alone. The
+   same PAT covers all three jobs that touch the tap repo
+   (`mirror-to-tap`, `publish-homebrew-formula`, `deb.yml`).
 
-3. **Mint a fine-grained PAT for the binaries repo.** GitHub →
-   Settings → Developer settings → Personal access tokens → Fine-
-   grained tokens → Generate new token. Limit it to
-   `zunel-hive/zunel-binaries`, grant **Contents: Read and write**,
-   leave everything else alone.
-
-4. **Mint a second fine-grained PAT for the tap repo.** Same flow,
-   limited to `zunel-hive/homebrew-tap`, **Contents: Read and write**.
-
-5. **Add both PATs as secrets on `zunel-hive/zunel`.** Settings →
+3. **Add the PAT as a secret on `zunel-hive/zunel`.** Settings →
    Secrets and variables → Actions → New repository secret. Add
    exactly:
-   - `BINARIES_TOKEN` = PAT from step 3 (used by `mirror-to-binaries`
-     in `release.yml` and by `deb.yml`).
-   - `HOMEBREW_TAP_TOKEN` = PAT from step 4 (used by
-     `publish-homebrew-formula` in `release.yml`).
+   - `HOMEBREW_TAP_TOKEN` = PAT from step 2 (used by
+     `mirror-to-tap` + `publish-homebrew-formula` in `release.yml`
+     and by `deb.yml`).
 
-6. **(Optional) Verify locally.** With `cargo-dist` 0.31 installed
+4. **(Optional) Verify locally.** With `cargo-dist` 0.31 installed
    (already in `~/.cargo/bin/dist`):
 
    ```bash
@@ -116,7 +113,7 @@ maintainer with a GitHub session signed in as `zunel-hive`.
 
    Should report the same per-target tarballs the live release will
    produce, plus a `homebrew` installer artifact. The plan output
-   references the binaries repo URL because that's what
+   references the tap repo URL because that's what
    `[workspace.package].repository` is set to.
 
 That's all the manual setup. Cutting subsequent releases is fully
@@ -145,19 +142,19 @@ GitHub Actions then:
    builds the four per-target tarballs in parallel, computes SHA256s,
    creates a GitHub Release on `zunel-hive/zunel` (private),
    uploads the tarballs + `.rb` formula.
-2. `release.yml > mirror-to-binaries` re-creates the same release on
-   `zunel-hive/zunel-binaries` (public) with every artifact, using
-   `BINARIES_TOKEN`. After this, formula URLs and `.deb` install URLs
-   resolve for the public.
+2. `release.yml > mirror-to-tap` re-creates the same release on
+   `zunel-hive/homebrew-tap` (public) with every artifact, using
+   `HOMEBREW_TAP_TOKEN`. After this, formula URLs and `.deb` install
+   URLs resolve for the public.
 3. `release.yml > publish-homebrew-formula` clones
-   `zunel-hive/homebrew-tap` (using `HOMEBREW_TAP_TOKEN`), drops a fresh
-   `Formula/zunel.rb` referencing the binaries-repo tarballs, commits,
-   pushes.
+   `zunel-hive/homebrew-tap` (using the same `HOMEBREW_TAP_TOKEN`),
+   drops a fresh `Formula/zunel.rb` referencing the tap-repo
+   tarballs, commits, pushes.
 4. `release.yml > announce` finalizes the source-side GitHub Release.
 5. The upstream `Release` workflow's completion triggers `deb.yml`,
-   which downloads the musl tarballs from `zunel-hive/zunel-binaries`,
+   which downloads the musl tarballs from `zunel-hive/homebrew-tap`,
    builds `zunel-amd64.deb` and `zunel-arm64.deb`, and uploads them
-   back to the same binaries-repo release.
+   back to the same tap-repo release.
 
 Total wall-clock is ~10 minutes end-to-end on cold caches.
 
@@ -230,14 +227,15 @@ diff -U2 /tmp/release.yml.handpatched .github/workflows/release.yml
 #    and GitHub-hosted Linux runners ship with a cached rustc that is
 #    often below the workspace MSRV.
 
-# 7. Re-apply the `mirror-to-binaries` job between `host` and
-#    `publish-homebrew-formula`. cargo-dist doesn't know about the
-#    binaries-repo split; the job is purely a hand-patch. It downloads
-#    every `artifacts-*` upload from the workflow run and creates a
-#    parallel GitHub Release on `zunel-hive/zunel-binaries` using the
-#    `BINARIES_TOKEN` secret. Then add `mirror-to-binaries` to the
-#    `needs:` lists of `publish-homebrew-formula` and `announce`, and
-#    extend the `announce.if:` to gate on its result. See the current
+# 7. Re-apply the `mirror-to-tap` job between `host` and
+#    `publish-homebrew-formula`. cargo-dist doesn't know that the tap
+#    repo is also our public binary host; the job is purely a hand-
+#    patch. It downloads every `artifacts-*` upload from the workflow
+#    run and creates a parallel GitHub Release on
+#    `zunel-hive/homebrew-tap` using the `HOMEBREW_TAP_TOKEN` secret.
+#    Then add `mirror-to-tap` to the `needs:` lists of
+#    `publish-homebrew-formula` and `announce`, and extend the
+#    `announce.if:` to gate on its result. See the current
 #    `release.yml` for the exact wiring.
 
 # 8. Re-apply the Homebrew service-block injection inside the

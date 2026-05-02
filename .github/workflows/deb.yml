@@ -2,13 +2,16 @@ name: Debian package
 
 # Fires after the cargo-dist `Release` workflow (defined in `release.yml`)
 # has finished publishing its tarballs and Homebrew formula to a GitHub
-# Release. This workflow:
-#   1. Downloads the per-arch musl tarballs cargo-dist already produced.
+# Release on the public tap repo (`zunel-hive/homebrew-tap`, mirrored
+# from the private source repo by `release.yml > mirror-to-tap`). This
+# workflow:
+#   1. Downloads the per-arch musl tarballs cargo-dist already produced
+#      from the tap repo's release.
 #   2. Stages each binary at the path `cargo deb --target <triple>` looks
 #      for (`rust/target/<triple>/release/zunel`) and runs cargo-deb in
 #      `--no-build --no-strip` mode so we don't rebuild from source.
-#   3. Uploads the resulting `.deb`s back to the same GitHub Release as
-#      additional assets.
+#   3. Uploads the resulting `.deb`s back to the same release on the
+#      tap repo as additional assets.
 #
 # The .debs are self-contained statically-linked musl binaries with no
 # `Depends:` beyond the auto-detected (essentially empty) shared-lib
@@ -59,13 +62,14 @@ jobs:
       # the upstream Release workflow — for tag pushes that's the tag
       # name (e.g., "v0.2.0"), exactly what `gh release` wants below.
       TAG: ${{ github.event.workflow_run.head_branch || github.event.inputs.tag }}
-      # All `gh release` calls below target `zunel-hive/zunel-binaries`
-      # (the public binary host), not the source repo we're running in.
-      # Using `BINARIES_TOKEN` (fine-grained PAT scoped to that repo
-      # with Contents: Read+Write) keeps cross-repo access explicit and
-      # least-privilege; the default `GITHUB_TOKEN` is repo-scoped to
-      # the source side and can't write to the binaries repo.
-      GH_TOKEN: ${{ secrets.BINARIES_TOKEN }}
+      # All `gh release` calls below target `zunel-hive/homebrew-tap`
+      # (the public binary host — the same tap repo that holds
+      # `Formula/zunel.rb`), not the source repo we're running in.
+      # Using `HOMEBREW_TAP_TOKEN` (fine-grained PAT scoped to that
+      # repo with Contents: Read+Write) keeps cross-repo access
+      # explicit and least-privilege; the default `GITHUB_TOKEN` is
+      # repo-scoped to the source side and can't write to the tap repo.
+      GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -95,7 +99,7 @@ jobs:
           # pull down `.tar.xz.sha256` checksum files (which the
           # extraction step below would then try to feed into `tar`).
           gh release download "$TAG" \
-            --repo zunel-hive/zunel-binaries \
+            --repo zunel-hive/homebrew-tap \
             --pattern "*${{ matrix.triple }}.tar.xz" \
             --pattern "*${{ matrix.triple }}.tar.gz" \
             --pattern "*${{ matrix.triple }}.tar.zst" \
@@ -161,5 +165,5 @@ jobs:
         run: |
           gh release upload "$TAG" \
             "rust/target/zunel-${{ matrix.deb_arch }}.deb" \
-            --repo zunel-hive/zunel-binaries \
+            --repo zunel-hive/homebrew-tap \
             --clobber
