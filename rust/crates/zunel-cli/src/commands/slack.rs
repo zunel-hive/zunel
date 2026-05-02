@@ -539,6 +539,7 @@ fn print_refresh_outcome(args: &SlackRefreshBotArgs, outcome: &RefreshOutcome) {
             RefreshOutcome::Skipped {
                 secs_until_exp,
                 expires_at,
+                ..
             } => json!({
                 "ok": true,
                 "skipped": true,
@@ -549,6 +550,7 @@ fn print_refresh_outcome(args: &SlackRefreshBotArgs, outcome: &RefreshOutcome) {
             RefreshOutcome::Refreshed {
                 expires_at,
                 expires_in,
+                ..
             } => json!({
                 "ok": true,
                 "skipped": false,
@@ -569,6 +571,7 @@ fn print_refresh_outcome(args: &SlackRefreshBotArgs, outcome: &RefreshOutcome) {
         RefreshOutcome::Refreshed {
             expires_at,
             expires_in,
+            ..
         } => {
             println!("ok refreshed: new expires_at={expires_at} (in {expires_in}s)");
         }

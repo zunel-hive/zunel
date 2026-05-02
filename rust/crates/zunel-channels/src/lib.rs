@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use zunel_bus::{MessageBus, OutboundMessage};
 use zunel_config::ChannelsConfig;
 
-use crate::slack::SlackChannel;
+use crate::slack::{BotTokenHandle, SlackChannel};
 
 /// Acquire a poison-tolerant lock on the channel registry.
 ///
@@ -113,14 +113,40 @@ impl ChannelManager {
     }
 }
 
-pub fn build_channel_manager(config: &ChannelsConfig, bus: Arc<MessageBus>) -> ChannelManager {
+/// What [`build_channel_manager`] hands back: the manager itself
+/// plus a per-channel "live config handle" map for things the
+/// gateway-side background tasks need to splice into running
+/// channels (today: just the rotating Slack bot token, see the
+/// `slack_bot_token` field).
+///
+/// Returning this struct instead of just the manager lets the
+/// caller wire the bot-refresh loop straight into the same
+/// `Arc<RwLock<String>>` the live `SlackChannel` is reading from on
+/// every outbound `chat.postMessage`. Without this, the refresh
+/// loop's writes to `~/.zunel/slack-app/app_info.json` +
+/// `config.json` only became visible to the running gateway after a
+/// process restart.
+pub struct BuiltChannels {
+    pub manager: ChannelManager,
+    /// Live handle on the Slack bot token. `None` when no
+    /// `channels.slack` block is configured (so no Slack channel was
+    /// registered).
+    pub slack_bot_token: Option<BotTokenHandle>,
+}
+
+pub fn build_channel_manager(config: &ChannelsConfig, bus: Arc<MessageBus>) -> BuiltChannels {
     let manager = ChannelManager::new(bus);
+    let mut slack_bot_token: Option<BotTokenHandle> = None;
     if let Some(slack) = config.slack.clone() {
         let mut channel = SlackChannel::new(slack);
         if let Ok(api_base) = std::env::var("ZUNEL_UNSAFE_SLACK_API_BASE") {
             channel = channel.with_api_base(api_base);
         }
+        slack_bot_token = Some(channel.bot_token_handle());
         manager.register(Arc::new(channel));
     }
-    manager
+    BuiltChannels {
+        manager,
+        slack_bot_token,
+    }
 }

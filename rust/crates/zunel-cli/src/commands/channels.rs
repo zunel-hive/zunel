@@ -20,7 +20,7 @@ async fn status(config_path: Option<&Path>) -> Result<()> {
     zunel_util::ensure_dir(&workspace)
         .with_context(|| format!("creating workspace dir {}", workspace.display()))?;
 
-    let manager = build_channel_manager(&cfg.channels, Arc::new(MessageBus::new(256)));
+    let manager = build_channel_manager(&cfg.channels, Arc::new(MessageBus::new(256))).manager;
     let statuses = manager.statuses().await;
     println!("channels: {}", statuses.len());
     for channel in statuses {

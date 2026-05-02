@@ -16,7 +16,7 @@ mod api;
 pub mod bot_refresh;
 mod inbound;
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
@@ -30,8 +30,18 @@ use zunel_config::SlackChannelConfig;
 
 use crate::{Channel, ChannelStatus, Error, Result};
 
+/// Shared, hot-swappable Slack bot token. The gateway's bot-refresh
+/// task writes through this handle on every successful rotation so
+/// the next outbound `chat.postMessage` (and inbound reaction /
+/// file download) uses the fresh token without restarting the
+/// process. See `bot_refresh.rs` for the rotation flow and
+/// `docs/configuration.md > Background bot-token refresh` for the
+/// operator-facing semantics.
+pub type BotTokenHandle = Arc<RwLock<String>>;
+
 pub struct SlackChannel {
     config: SlackChannelConfig,
+    bot_token: BotTokenHandle,
     api_base: String,
     client: reqwest::Client,
     connected: Arc<Mutex<bool>>,
@@ -40,8 +50,10 @@ pub struct SlackChannel {
 
 impl SlackChannel {
     pub fn new(config: SlackChannelConfig) -> Self {
+        let bot_token = Arc::new(RwLock::new(config.bot_token.clone().unwrap_or_default()));
         Self {
             config,
+            bot_token,
             api_base: "https://slack.com".into(),
             client: reqwest::Client::new(),
             connected: Arc::new(Mutex::new(false)),
@@ -52,6 +64,23 @@ impl SlackChannel {
     pub fn with_api_base(mut self, api_base: String) -> Self {
         self.api_base = api_base.trim_end_matches('/').to_string();
         self
+    }
+
+    /// Hand-out the live bot-token cell so the gateway-side
+    /// bot-refresh loop can splice in a freshly-rotated token after
+    /// every successful `oauth.v2.access` exchange. The next
+    /// outbound `chat.postMessage`, reactions write, and Slack file
+    /// download will pick up the new value without a process
+    /// restart.
+    pub fn bot_token_handle(&self) -> BotTokenHandle {
+        Arc::clone(&self.bot_token)
+    }
+
+    fn snapshot_bot_token(&self) -> String {
+        self.bot_token
+            .read()
+            .expect("slack bot token handle poisoned")
+            .clone()
     }
 
     pub async fn status(&self) -> ChannelStatus {
@@ -68,8 +97,12 @@ impl SlackChannel {
             };
         }
 
+        let bot_token_snapshot = self.snapshot_bot_token();
         let missing: Vec<&str> = [
-            ("bot token", self.config.bot_token.as_deref()),
+            (
+                "bot token",
+                Some(bot_token_snapshot.as_str()).filter(|s| !s.is_empty()),
+            ),
             ("app token", self.config.app_token.as_deref()),
         ]
         .into_iter()
@@ -130,16 +163,14 @@ impl Channel for SlackChannel {
                 channel: "slack".into(),
                 message: "missing app token".into(),
             })?;
-        let bot_token = self
-            .config
-            .bot_token
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| Error::Channel {
+        let bot_token_snapshot = self.snapshot_bot_token();
+        if bot_token_snapshot.is_empty() {
+            return Err(Error::Channel {
                 channel: "slack".into(),
                 message: "missing bot token".into(),
-            })?;
-        let bot_user_id = api::auth_test(&self.client, &self.api_base, bot_token).await?;
+            });
+        }
+        let bot_user_id = api::auth_test(&self.client, &self.api_base, &bot_token_snapshot).await?;
         let socket_url = api::open_socket_url(&self.client, &self.api_base, app_token).await?;
         let (socket, _) = tokio_tungstenite::connect_async(&socket_url)
             .await
@@ -153,7 +184,7 @@ impl Channel for SlackChannel {
         let connected = self.connected.clone();
         let client = self.client.clone();
         let api_base = self.api_base.clone();
-        let bot_token = bot_token.to_string();
+        let bot_token_handle = self.bot_token_handle();
         let app_token = app_token.to_string();
         *connected.lock().await = true;
         let task = tokio::spawn(socket_loop(
@@ -163,7 +194,7 @@ impl Channel for SlackChannel {
             connected,
             client,
             api_base,
-            bot_token,
+            bot_token_handle,
             app_token,
             bus,
         ));
@@ -186,16 +217,18 @@ impl Channel for SlackChannel {
                 message: "disabled".into(),
             });
         }
-        let token = self
-            .config
-            .bot_token
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| Error::Channel {
+        // Snapshot the live token under a brief read lock instead of
+        // capturing it once at boot. Hot-swap from the bot-refresh
+        // loop is therefore picked up on the very next outbound call,
+        // no restart required.
+        let token = self.snapshot_bot_token();
+        if token.is_empty() {
+            return Err(Error::Channel {
                 channel: "slack".into(),
                 message: "missing bot token".into(),
-            })?;
-        api::send_outbound(&self.client, &self.api_base, &self.config, token, &message).await
+            });
+        }
+        api::send_outbound(&self.client, &self.api_base, &self.config, &token, &message).await
     }
 
     async fn status(&self) -> ChannelStatus {
@@ -220,6 +253,12 @@ type SocketHalves = (
 /// Long-running Socket Mode loop. Owns the WS halves, runs forever (until
 /// the spawned task is aborted by `stop()`), and silently reconnects on any
 /// IO/transport failure with a 250ms backoff.
+///
+/// The bot token is read through `bot_token` ([`BotTokenHandle`]) on every
+/// reactions/file-download call rather than captured by value at spawn,
+/// so a successful `oauth.v2.access` rotation in the gateway's
+/// bot-refresh loop is picked up immediately by the next inbound event
+/// — same staleness fix as the outbound `send` path.
 #[allow(clippy::too_many_arguments)]
 async fn socket_loop(
     first_socket: SocketHalves,
@@ -228,7 +267,7 @@ async fn socket_loop(
     connected: Arc<Mutex<bool>>,
     client: reqwest::Client,
     api_base: String,
-    bot_token: String,
+    bot_token: BotTokenHandle,
     app_token: String,
     bus: Arc<MessageBus>,
 ) {
@@ -274,10 +313,14 @@ async fn socket_loop(
                     if let Some((channel, timestamp, emoji)) =
                         inbound::inbound_reaction_target(&config, &value)
                     {
+                        let token = bot_token
+                            .read()
+                            .expect("slack bot token handle poisoned")
+                            .clone();
                         let _ = api::post_reaction(
                             &client,
                             &api_base,
-                            &bot_token,
+                            &token,
                             "reactions.add",
                             &channel,
                             &emoji,
@@ -285,7 +328,11 @@ async fn socket_loop(
                         )
                         .await;
                     }
-                    inbound.media = api::download_slack_files(&client, &bot_token, &value).await;
+                    let token = bot_token
+                        .read()
+                        .expect("slack bot token handle poisoned")
+                        .clone();
+                    inbound.media = api::download_slack_files(&client, &token, &value).await;
                 }
                 let _ = bus.publish_inbound(inbound).await;
             }

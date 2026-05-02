@@ -8,6 +8,7 @@ use zunel_channels::build_channel_manager;
 use zunel_channels::slack::bot_refresh::{
     refresh_bot_if_near_expiry, RefreshContext, RefreshOutcome,
 };
+use zunel_channels::slack::BotTokenHandle;
 use zunel_core::{
     build_default_registry, build_default_registry_async, mcp_reconnect::McpReconnectTool,
     reconnect_unhealthy_mcp_servers, AgentLoop, ApprovalScope, ReloadReport,
@@ -45,7 +46,9 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
         .with_context(|| format!("creating workspace dir {}", workspace.display()))?;
 
     let bus = Arc::new(MessageBus::new(256));
-    let channels = build_channel_manager(&cfg.channels, bus.clone());
+    let built = build_channel_manager(&cfg.channels, bus.clone());
+    let channels = built.manager;
+    let slack_bot_token_handle = built.slack_bot_token;
 
     if args.dry_run {
         let statuses = channels.statuses().await;
@@ -127,7 +130,7 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
         }
     };
 
-    let bot_refresh_task = spawn_bot_refresh_task(config_path);
+    let bot_refresh_task = spawn_bot_refresh_task(config_path, slack_bot_token_handle);
     let mcp_refresh_task = spawn_mcp_refresh_task(config_path);
     let mcp_reconnect_task = spawn_mcp_reconnect_task(agent_loop.tools_handle(), config_path);
 
@@ -164,13 +167,26 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
 /// `BOT_REFRESH_DEFAULT_TICK_SECS` seconds and calls
 /// `refresh_bot_if_near_expiry(_, Some(BOT_REFRESH_DEFAULT_WINDOW_SECS))`
 /// (exactly the code path `zunel slack refresh-bot --if-near-expiry 1800`
-/// runs from the LaunchAgent wrapper). With this in place, `brew services
-/// start zunel` and `zunel gateway` directly are fully self-sufficient:
-/// the external `~/.zunel/bin/run-gateway.sh` and
-/// `com.zunel.gateway-rotate` 6h kicker LaunchAgents become optional.
-/// Refresh failures are logged at WARN and never crash the gateway,
-/// matching the fail-soft policy of the wrapper.
-fn spawn_bot_refresh_task(config_path: Option<&Path>) -> Option<tokio::task::JoinHandle<()>> {
+/// runs from the LaunchAgent wrapper).
+///
+/// On every successful rotation the loop also writes the new token
+/// straight into the live `SlackChannel`'s [`BotTokenHandle`], so the
+/// next outbound `chat.postMessage` and inbound reactions/file-download
+/// pick it up immediately. Without this hand-off, the gateway would
+/// keep using the boot-time token in process even after the on-disk
+/// files were updated and the next outbound call would fail with
+/// `token_expired` until the gateway was restarted.
+///
+/// With this in place, `brew services start zunel` and `zunel gateway`
+/// directly are fully self-sufficient: the external
+/// `~/.zunel/bin/run-gateway.sh` and `com.zunel.gateway-rotate` 6h
+/// kicker LaunchAgents become optional. Refresh failures are logged
+/// at WARN and never crash the gateway, matching the fail-soft policy
+/// of the wrapper.
+fn spawn_bot_refresh_task(
+    config_path: Option<&Path>,
+    bot_token_handle: Option<BotTokenHandle>,
+) -> Option<tokio::task::JoinHandle<()>> {
     let cfg_path = match config_path {
         Some(path) => path.to_path_buf(),
         None => match zunel_config::default_config_path() {
@@ -204,7 +220,13 @@ fn spawn_bot_refresh_task(config_path: Option<&Path>) -> Option<tokio::task::Joi
     ) as i64;
     let ctx = RefreshContext::from_zunel_home(&home, cfg_path);
 
-    Some(tokio::spawn(refresh_loop(ctx, tick_secs, window, app_info)))
+    Some(tokio::spawn(refresh_loop(
+        ctx,
+        tick_secs,
+        window,
+        app_info,
+        bot_token_handle,
+    )))
 }
 
 async fn refresh_loop(
@@ -212,11 +234,13 @@ async fn refresh_loop(
     tick_secs: u64,
     window_secs: i64,
     app_info_path: PathBuf,
+    bot_token_handle: Option<BotTokenHandle>,
 ) {
     tracing::info!(
         path = %app_info_path.display(),
         tick_secs,
         window_secs,
+        in_process_swap = bot_token_handle.is_some(),
         "starting in-runtime slack bot token refresh"
     );
     let mut ticker = tokio::time::interval(Duration::from_secs(tick_secs));
@@ -226,21 +250,46 @@ async fn refresh_loop(
     loop {
         ticker.tick().await;
         match refresh_bot_if_near_expiry(&ctx, Some(window_secs)).await {
-            Ok(RefreshOutcome::Skipped { secs_until_exp, .. }) => {
-                tracing::debug!(
-                    secs_until_exp,
-                    "slack bot token still fresh; skipping refresh"
-                );
-            }
-            Ok(RefreshOutcome::Refreshed {
-                expires_at,
-                expires_in,
-            }) => {
-                tracing::info!(
-                    expires_at,
-                    expires_in,
-                    "refreshed slack bot token via in-runtime task"
-                );
+            Ok(outcome) => {
+                // Converge the in-process handle to whatever's on
+                // disk on every successful tick, not just on
+                // `Refreshed`. This covers the case where some other
+                // process (out-of-band `zunel slack refresh-bot`,
+                // a launchd timer, a sibling gateway instance)
+                // rotated the token between our ticks.
+                if let Some(handle) = &bot_token_handle {
+                    let on_disk = outcome.bot_token();
+                    if !on_disk.is_empty() {
+                        let needs_swap = {
+                            let r = handle.read().expect("slack bot token handle poisoned");
+                            r.as_str() != on_disk
+                        };
+                        if needs_swap {
+                            let mut w = handle.write().expect("slack bot token handle poisoned");
+                            *w = on_disk.to_string();
+                            tracing::info!("synced in-process slack bot token to on-disk value");
+                        }
+                    }
+                }
+                match outcome {
+                    RefreshOutcome::Skipped { secs_until_exp, .. } => {
+                        tracing::debug!(
+                            secs_until_exp,
+                            "slack bot token still fresh; skipping refresh"
+                        );
+                    }
+                    RefreshOutcome::Refreshed {
+                        expires_at,
+                        expires_in,
+                        ..
+                    } => {
+                        tracing::info!(
+                            expires_at,
+                            expires_in,
+                            "refreshed slack bot token via in-runtime task"
+                        );
+                    }
+                }
             }
             Err(err) => {
                 tracing::warn!(error = %err, "in-runtime slack bot refresh failed; will retry on next tick");

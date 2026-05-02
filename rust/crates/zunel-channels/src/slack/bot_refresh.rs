@@ -21,20 +21,48 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-/// Outcome of a refresh attempt. Carries the new expiry so callers can
-/// log / surface a useful one-liner without re-reading `app_info.json`.
+/// Outcome of a refresh attempt. Carries the current bot token in
+/// **both** branches so the gateway-side refresh loop can converge
+/// the in-process `SlackChannel` handle to the on-disk value on
+/// every tick — including the case where some other process
+/// (manual `zunel slack refresh-bot`, an out-of-band launchd timer,
+/// a different gateway instance) rotated the token between ticks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshOutcome {
     /// `--if-near-expiry SECS` was provided and the cached token still
     /// has more than `SECS` of life left, so we did not touch Slack or
-    /// the filesystem.
+    /// the filesystem. `bot_token` is the cached value just read from
+    /// `app_info.json`; the loop uses this to keep the in-process
+    /// `SlackChannel` handle aligned with disk even when no new
+    /// rotation happened.
     Skipped {
         secs_until_exp: i64,
         expires_at: i64,
+        bot_token: String,
     },
     /// The token was exchanged. `expires_at` is the new absolute epoch
-    /// seconds; `expires_in` is what Slack returned (relative seconds).
-    Refreshed { expires_at: i64, expires_in: i64 },
+    /// seconds; `expires_in` is what Slack returned (relative seconds);
+    /// `bot_token` is the freshly-minted access token Slack returned —
+    /// surfaced so the gateway-side refresh loop can splice it into
+    /// the live `SlackChannel` handle without re-reading
+    /// `app_info.json` from disk a second time.
+    Refreshed {
+        expires_at: i64,
+        expires_in: i64,
+        bot_token: String,
+    },
+}
+
+impl RefreshOutcome {
+    /// Best-known current bot token, regardless of whether a rotation
+    /// just happened. The gateway's refresh loop uses this to keep the
+    /// in-process [`crate::slack::BotTokenHandle`] aligned with disk.
+    pub fn bot_token(&self) -> &str {
+        match self {
+            RefreshOutcome::Skipped { bot_token, .. } => bot_token,
+            RefreshOutcome::Refreshed { bot_token, .. } => bot_token,
+        }
+    }
 }
 
 impl RefreshOutcome {
@@ -152,9 +180,19 @@ pub async fn refresh_bot_if_near_expiry(
 
     if let Some(window) = if_near_expiry {
         if secs_until_exp > window {
+            // Read the on-disk `bot_token` so the loop can converge
+            // its in-process handle even on a "skipped" tick — covers
+            // the external-refresh case (someone ran `zunel slack
+            // refresh-bot` from a launchd timer, etc.).
+            let cached_bot = app_info
+                .get("bot_token")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             return Ok(RefreshOutcome::Skipped {
                 secs_until_exp,
                 expires_at: cached_exp,
+                bot_token: cached_bot,
             });
         }
     }
@@ -193,6 +231,7 @@ pub async fn refresh_bot_if_near_expiry(
     Ok(RefreshOutcome::Refreshed {
         expires_at: new_exp,
         expires_in,
+        bot_token: new_bot,
     })
 }
 
@@ -375,7 +414,13 @@ mod tests {
             slack_api_base: slack.uri(),
         };
         let outcome = refresh_bot_if_near_expiry(&ctx, Some(1800)).await.unwrap();
-        assert!(outcome.is_refreshed());
+        let RefreshOutcome::Refreshed { bot_token, .. } = &outcome else {
+            panic!("expected Refreshed, got {outcome:?}");
+        };
+        assert_eq!(
+            bot_token, "xoxb-fresh",
+            "Refreshed must surface the freshly-minted token so the gateway loop can hot-swap in-process"
+        );
 
         let info_v: Value = serde_json::from_str(&std::fs::read_to_string(&info).unwrap()).unwrap();
         assert_eq!(info_v["bot_token"], "xoxb-fresh");
@@ -413,7 +458,13 @@ mod tests {
             slack_api_base: "http://127.0.0.1:1".into(), // any: not contacted
         };
         let outcome = refresh_bot_if_near_expiry(&ctx, Some(1800)).await.unwrap();
-        assert!(matches!(outcome, RefreshOutcome::Skipped { .. }));
+        let RefreshOutcome::Skipped { bot_token, .. } = &outcome else {
+            panic!("expected Skipped, got {outcome:?}");
+        };
+        assert_eq!(
+            bot_token, "xoxb-still-good",
+            "Skipped must carry the on-disk bot token so the gateway loop can converge its in-process handle"
+        );
 
         // Files untouched.
         let info_v: Value = serde_json::from_str(&std::fs::read_to_string(&info).unwrap()).unwrap();

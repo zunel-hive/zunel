@@ -218,13 +218,20 @@ runs at gateway startup and then every 30 minutes for the lifetime of
 the process. Refresh failures are logged at `WARN` and never crash
 the gateway.
 
+When a refresh succeeds, the new token is **spliced into the live
+`SlackChannel` in-process** in addition to being written to disk. The
+next outbound `chat.postMessage` and any inbound reaction or file
+download immediately use the fresh token — no gateway restart is
+required. The boot log line records this with `in_process_swap=true`.
+
 This means **no external wrapper script is required for bot rotation**:
 `brew services start zunel` is enough. The runtime calls exactly the
 same code path `zunel slack refresh-bot --if-near-expiry 1800` does.
 
 You can still invoke `zunel slack refresh-bot` from the shell or a
 launchd / systemd timer if you prefer eager refreshes outside the
-30-minute window.
+30-minute window — the next gateway tick (or the next outbound send)
+will pick the new token off disk on its own.
 
 Tunables (env vars on the gateway process):
 
