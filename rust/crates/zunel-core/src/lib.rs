@@ -8,6 +8,7 @@ pub mod default_tools;
 pub mod document;
 mod error;
 pub mod hook;
+pub mod mcp_reconnect;
 mod memory;
 pub mod runner;
 mod session;
@@ -15,7 +16,7 @@ pub mod subagent;
 pub mod trim;
 pub mod usage_footer;
 
-pub use agent_loop::{AgentLoop, RunResult};
+pub use agent_loop::{AgentLoop, RunResult, SharedToolRegistry};
 pub use approval::{
     summarize_tool_call, tool_requires_approval, AllowAllApprovalHandler, ApprovalDecision,
     ApprovalHandler, ApprovalRequest, ApprovalScope, BusApprovalHandler, CachedApprovalHandler,
@@ -23,7 +24,10 @@ pub use approval::{
 };
 pub use command::{CommandContext, CommandOutcome, CommandRouter};
 pub use compaction::CompactionService;
-pub use default_tools::{build_default_registry, build_default_registry_async};
+pub use default_tools::{
+    build_default_registry, build_default_registry_async, reconnect_unhealthy_mcp_servers,
+    reload_mcp_servers, ReloadReport,
+};
 pub use document::{extract_documents, extract_documents_with_limit};
 pub use error::{Error, Result};
 pub use hook::{AgentHook, AgentHookContext};

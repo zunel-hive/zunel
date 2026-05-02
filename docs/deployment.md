@@ -234,6 +234,8 @@ Tunables (env vars on the gateway process):
 | `ZUNEL_BOT_REFRESH_WINDOW_SECS`  | `1800`  | Refresh the Slack bot token when it has less than this many seconds left |
 | `ZUNEL_MCP_REFRESH_TICK_SECS`    | `1800`  | How often the remote-MCP OAuth refresh task wakes up. Walks every OAuth-enabled server in `tools.mcpServers` and rotates `~/.zunel/mcp-oauth/<server>/token.json` via the cached `refresh_token`. |
 | `ZUNEL_MCP_REFRESH_DISABLED`     | unset   | Set to `1` / `true` / `yes` to skip spawning the remote-MCP refresh task entirely |
+| `ZUNEL_MCP_RECONNECT_TICK_SECS`  | `300`   | How often the MCP auto-reconnect task wakes up. For each configured MCP server with no live tools (and no `mcp_<name>_login_required` stub), tries to register it again so a server that was down at boot heals itself once it comes back online. |
+| `ZUNEL_MCP_RECONNECT_DISABLED`   | unset   | Set to `1` / `true` / `yes` to skip spawning the MCP auto-reconnect task |
 | `ZUNEL_DISABLE_SELF_MCP`         | unset   | Set to `1` / `true` / `yes` to skip auto-registering the built-in self stdio MCP server (`zunel_self`). Use when you've manually wired a `--server self` entry of your own or want a stripped tool registry. |
 
 Users without bot rotation (no `slack-app/app_info.json` on disk) pay

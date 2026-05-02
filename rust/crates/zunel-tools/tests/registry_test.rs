@@ -80,6 +80,33 @@ async fn registry_rejects_invalid_args_with_hint_suffix() {
         .ends_with("\n\n[Analyze the error above and try a different approach.]"));
 }
 
+#[tokio::test]
+async fn unregister_removes_a_previously_registered_tool() {
+    let mut registry = ToolRegistry::new();
+    registry.register(std::sync::Arc::new(EchoTool));
+    assert!(registry.get("echo").is_some());
+
+    let removed = registry.unregister("echo");
+    assert!(
+        removed.is_some(),
+        "unregister should return the dropped tool"
+    );
+    assert!(registry.get("echo").is_none());
+
+    let result = registry
+        .execute("echo", json!({"text": "hi"}), &ToolContext::for_test())
+        .await
+        .unwrap();
+    assert!(result.is_error);
+    assert!(result.content.contains("unknown tool"));
+}
+
+#[test]
+fn unregister_returns_none_when_tool_was_never_registered() {
+    let mut registry = ToolRegistry::new();
+    assert!(registry.unregister("never_existed").is_none());
+}
+
 #[test]
 fn get_definitions_orders_mcp_tools_last() {
     struct Tool1;

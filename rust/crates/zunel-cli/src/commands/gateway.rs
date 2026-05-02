@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -9,8 +9,9 @@ use zunel_channels::slack::bot_refresh::{
     refresh_bot_if_near_expiry, RefreshContext, RefreshOutcome,
 };
 use zunel_core::{
-    build_default_registry, build_default_registry_async, AgentLoop, ApprovalScope,
-    RuntimeSelfStateProvider, SessionManager, SubagentManager,
+    build_default_registry, build_default_registry_async, mcp_reconnect::McpReconnectTool,
+    reconnect_unhealthy_mcp_servers, AgentLoop, ApprovalScope, ReloadReport,
+    RuntimeSelfStateProvider, SessionManager, SharedToolRegistry, SubagentManager,
 };
 use zunel_tools::{self_tool::SelfTool, spawn::SpawnTool};
 
@@ -28,6 +29,12 @@ const BOT_REFRESH_DEFAULT_WINDOW_SECS: i64 = 1800;
 /// via `ZUNEL_MCP_REFRESH_TICK_SECS`; set `ZUNEL_MCP_REFRESH_DISABLED=1`
 /// to opt out entirely.
 const MCP_REFRESH_DEFAULT_TICK_SECS: u64 = 1800;
+
+/// Wake up every 5 minutes to retry MCP servers that aren't currently
+/// serving any tools (the "redlab failed at boot, then came online"
+/// case). Tunable via `ZUNEL_MCP_RECONNECT_TICK_SECS`; set
+/// `ZUNEL_MCP_RECONNECT_DISABLED=1` to opt out.
+const MCP_RECONNECT_DEFAULT_TICK_SECS: u64 = 300;
 
 pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
     let cfg = zunel_config::load_config(config_path).with_context(|| "loading zunel config")?;
@@ -69,7 +76,8 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
         return Ok(());
     }
 
-    let agent_loop = Arc::new(build_gateway_agent_loop(&cfg, workspace.clone()).await?);
+    let agent_loop =
+        Arc::new(build_gateway_agent_loop(&cfg, workspace.clone(), config_path).await?);
 
     if let Some(max_inbound) = args.max_inbound {
         for _ in 0..max_inbound {
@@ -121,6 +129,7 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
 
     let bot_refresh_task = spawn_bot_refresh_task(config_path);
     let mcp_refresh_task = spawn_mcp_refresh_task(config_path);
+    let mcp_reconnect_task = spawn_mcp_reconnect_task(agent_loop.tools_handle(), config_path);
 
     tokio::signal::ctrl_c()
         .await
@@ -138,6 +147,9 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
         handle.abort();
     }
     if let Some(handle) = mcp_refresh_task {
+        handle.abort();
+    }
+    if let Some(handle) = mcp_reconnect_task {
         handle.abort();
     }
     Ok(())
@@ -340,6 +352,91 @@ async fn mcp_refresh_loop(
     }
 }
 
+/// Periodic in-runtime auto-reconnect for MCP servers that aren't
+/// currently serving any tools. The motivating case: an MCP backend
+/// (a Docker container, a remote service) was down at gateway boot
+/// so `register_mcp_tools` couldn't list its tools, and now it's
+/// healthy. Without this task the operator (or the LLM) has to
+/// invoke `/reload` or `mcp_reconnect` by hand; with it the gateway
+/// quietly heals itself within a tick.
+///
+/// Scope on purpose:
+/// - Only retries servers where the registry has neither
+///   `mcp_<name>_*` tools nor an `mcp_<name>_login_required` stub.
+///   The OAuth-needs-login case is excluded because periodic
+///   re-dialing can't fix expired credentials — chat-driven
+///   `mcp_login_complete` (or `zunel mcp login --force`) does.
+/// - The synthesized `zunel_self` entry is excluded too: it spawns
+///   the parent binary and effectively never fails in production.
+///
+/// Returns `None` when `ZUNEL_MCP_RECONNECT_DISABLED=1` so operators
+/// who want full external control over reconnect behavior can opt
+/// out.
+fn spawn_mcp_reconnect_task(
+    registry: SharedToolRegistry,
+    config_path: Option<&Path>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if env_disabled("ZUNEL_MCP_RECONNECT_DISABLED") {
+        tracing::info!("in-runtime MCP auto-reconnect disabled via ZUNEL_MCP_RECONNECT_DISABLED");
+        return None;
+    }
+    let tick_secs = parse_env_or(
+        "ZUNEL_MCP_RECONNECT_TICK_SECS",
+        MCP_RECONNECT_DEFAULT_TICK_SECS,
+    );
+    let cfg_path = config_path.map(Path::to_path_buf);
+    Some(tokio::spawn(mcp_reconnect_loop(
+        registry, cfg_path, tick_secs,
+    )))
+}
+
+async fn mcp_reconnect_loop(
+    registry: SharedToolRegistry,
+    config_path: Option<PathBuf>,
+    tick_secs: u64,
+) {
+    tracing::info!(tick_secs, "starting in-runtime MCP auto-reconnect");
+    let mut ticker = tokio::time::interval(Duration::from_secs(tick_secs));
+    // First tick fires immediately. On a healthy boot it's a near-
+    // no-op (every server is already serving tools); when something
+    // failed at boot it gives an early shot at recovery before
+    // operators notice.
+    loop {
+        ticker.tick().await;
+        let cfg = match zunel_config::load_config(config_path.as_deref()) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "MCP auto-reconnect: failed to reload config; will retry next tick"
+                );
+                continue;
+            }
+        };
+        let report = reconnect_unhealthy_mcp_servers(&registry, &cfg).await;
+        if !report.attempted.is_empty() {
+            log_mcp_reconnect_outcome(&report);
+        }
+    }
+}
+
+fn log_mcp_reconnect_outcome(report: &ReloadReport) {
+    if !report.succeeded.is_empty() {
+        tracing::info!(
+            servers = ?report.succeeded,
+            count = report.succeeded.len(),
+            "MCP auto-reconnect: brought server(s) online"
+        );
+    }
+    for (server, error) in &report.failed {
+        tracing::warn!(
+            server = %server,
+            error = %error,
+            "MCP auto-reconnect: still unable to reach server"
+        );
+    }
+}
+
 fn log_mcp_refresh_outcome(server: &str, outcome: zunel_mcp::OAuthRefreshOutcome) {
     use zunel_mcp::OAuthRefreshOutcome::*;
     match outcome {
@@ -403,6 +500,7 @@ fn build_scheduler(
 async fn build_gateway_agent_loop(
     cfg: &zunel_config::Config,
     workspace: std::path::PathBuf,
+    config_path: Option<&Path>,
 ) -> Result<AgentLoop> {
     let provider = zunel_providers::build_provider(cfg).with_context(|| "building provider")?;
     let sessions = SessionManager::new(&workspace);
@@ -419,6 +517,7 @@ async fn build_gateway_agent_loop(
     registry.register(Arc::new(SpawnTool::new(subagents.clone())));
     let mut tool_names: Vec<String> = registry.names().map(str::to_string).collect();
     tool_names.push("self".into());
+    tool_names.push("mcp_reconnect".into());
     registry.register(Arc::new(SelfTool::from_provider(Arc::new(
         RuntimeSelfStateProvider {
             model: cfg.agents.defaults.model.clone(),
@@ -441,6 +540,22 @@ async fn build_gateway_agent_loop(
         },
     ))));
 
+    // Wrap the registry in a shared handle so the `mcp_reconnect`
+    // native tool can splice MCP entries in/out at runtime against
+    // the same registry the gateway agent loop reads on every turn.
+    // This is what lets a Slack user say "reconnect redlab" and have
+    // the LLM reload it without anyone touching the gateway process.
+    let shared_registry = Arc::new(RwLock::new(registry));
+    {
+        let mut w = shared_registry
+            .write()
+            .expect("zunel tool registry lock poisoned");
+        w.register(Arc::new(McpReconnectTool::new(
+            Arc::clone(&shared_registry),
+            config_path.map(Path::to_path_buf),
+        )));
+    }
+
     // Load skills from `<workspace>/skills/` plus the binary-bundled
     // builtins (e.g. `mcp-oauth-login`). User skills win on name
     // collisions; embedded builtins fill in otherwise.
@@ -448,7 +563,7 @@ async fn build_gateway_agent_loop(
 
     Ok(
         AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions)
-            .with_tools(registry)
+            .with_tools_arc(shared_registry)
             .with_workspace(workspace)
             .with_skills(skills)
             .with_approval_required(cfg.tools.approval_required)

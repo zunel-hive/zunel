@@ -66,3 +66,42 @@ async fn register_tool_shows_up_in_tools_listing_alongside_defaults() {
         "missing self in {names:?}"
     );
 }
+
+#[tokio::test]
+async fn unregister_tool_drops_a_previously_added_custom_tool() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"{{
+              "providers": {{ "custom": {{ "apiKey": "sk", "apiBase": "http://localhost:0" }} }},
+              "agents": {{ "defaults": {{ "provider": "custom", "model": "m", "workspace": "{}" }} }}
+            }}"#,
+            tmp.path().display().to_string().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    let mut bot = Zunel::from_config(Some(&config_path)).await.unwrap();
+    bot.register_tool(Arc::new(CounterTool {
+        name: "scratch_tool",
+    }));
+    assert!(bot.tools().get("scratch_tool").is_some());
+
+    let removed = bot.unregister_tool("scratch_tool");
+    assert!(
+        removed,
+        "unregister_tool should report the tool was dropped"
+    );
+    assert!(
+        bot.tools().get("scratch_tool").is_none(),
+        "scratch_tool should not be in the registry after unregister"
+    );
+
+    // Defaults still around.
+    assert!(bot.tools().get("read_file").is_some());
+
+    // Unregistering an unknown tool reports false instead of panicking.
+    assert!(!bot.unregister_tool("nonexistent_tool"));
+}

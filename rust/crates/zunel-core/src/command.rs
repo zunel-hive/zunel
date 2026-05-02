@@ -22,6 +22,12 @@ pub enum CommandOutcome {
     Exit,
     /// Re-exec the current process (handled by the CLI, not core).
     Restart,
+    /// Re-discover MCP servers from disk and splice their tools into
+    /// the live registry. `target = None` reloads every configured
+    /// server; `target = Some(name)` reloads one. Handled by the
+    /// CLI REPL because it owns the `Arc<AgentLoop>` the reload
+    /// runs against.
+    ReloadMcp { target: Option<String> },
 }
 
 type BoxedHandler = Box<
@@ -105,6 +111,7 @@ pub mod builtins {
             "/help — Show available commands",
             "/clear — Clear the current conversation",
             "/status — Show bot status",
+            "/reload [server] — Re-discover MCP servers (or one by name) without restart",
             "/restart — Restart the process",
             "/exit — Exit the REPL (alias: /quit)",
         ]
@@ -130,6 +137,22 @@ pub mod builtins {
         });
         router.register_exact("/quit", |_ctx: CommandContext| async {
             Ok::<_, crate::Error>(CommandOutcome::Exit)
+        });
+        // `/reload` (no arg) reloads every configured MCP server;
+        // `/reload <name>` reloads one. Both shapes resolve to the
+        // same `ReloadMcp` outcome — the CLI REPL owns the
+        // `Arc<AgentLoop>` and runs the actual reload.
+        router.register_exact("/reload", |_ctx: CommandContext| async {
+            Ok::<_, crate::Error>(CommandOutcome::ReloadMcp { target: None })
+        });
+        router.register_prefix("/reload ", |ctx: CommandContext| async move {
+            let target = ctx.args.trim();
+            let target = if target.is_empty() {
+                None
+            } else {
+                Some(target.to_string())
+            };
+            Ok::<_, crate::Error>(CommandOutcome::ReloadMcp { target })
         });
         // /status is registered by the CLI because it needs access to
         // agent-level state (model name, session message count) that

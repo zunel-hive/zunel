@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokio::sync::Mutex;
 use zunel_config::{Config, McpServerConfig, WebToolsConfig};
@@ -80,6 +80,165 @@ async fn register_mcp_tools(registry: &mut ToolRegistry, cfg: &Config) {
         );
         register_one_mcp_server(registry, &name, &server).await;
     }
+}
+
+/// Per-call result of [`reload_mcp_servers`]. Surfaces which servers
+/// the reload tried to (re)connect, which succeeded (i.e. registered
+/// at least one tool), and which failed with a human-readable
+/// message — used both by the `/reload` slash command's reply and
+/// by the `mcp_reconnect` native tool's tool-result body.
+#[derive(Debug, Default, Clone)]
+pub struct ReloadReport {
+    pub attempted: Vec<String>,
+    pub succeeded: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
+/// Re-run MCP discovery for one or all configured servers and splice
+/// the freshly registered tools into the live registry.
+///
+/// `target = None` reloads every server in `cfg.tools.mcp_servers`
+/// plus the auto-synthesized `zunel_self` entry when applicable —
+/// matching boot-time `register_mcp_tools` behavior. `target =
+/// Some(name)` reloads only that one entry; "zunel_self" is
+/// recognised as the auto-synthesized self-MCP server name.
+///
+/// Network I/O happens off-lock — we connect, list tools, and
+/// build a per-server `ToolRegistry` chunk first, *then* take a
+/// single brief write lock to (a) drop any existing
+/// `mcp_<name>_*` (and `mcp_<name>_login_required`) entries for
+/// the target servers and (b) splice in the newly built tools.
+/// In-flight turns therefore never block on network I/O even when
+/// the registry is being reloaded under them.
+pub async fn reload_mcp_servers(
+    registry: &Arc<RwLock<ToolRegistry>>,
+    cfg: &Config,
+    target: Option<&str>,
+) -> ReloadReport {
+    let mut report = ReloadReport::default();
+
+    let candidates: Vec<(String, McpServerConfig)> = match target {
+        Some(name) => {
+            if let Some(server) = cfg.tools.mcp_servers.get(name) {
+                vec![(name.to_string(), server.clone())]
+            } else if name == "zunel_self"
+                && should_auto_register_self_mcp(cfg, &|key| std::env::var(key).ok())
+            {
+                let (n, s) = synthesize_self_mcp_server();
+                vec![(n, s)]
+            } else {
+                report.failed.push((
+                    name.to_string(),
+                    format!("server `{name}` is not configured in ~/.zunel/config.json"),
+                ));
+                return report;
+            }
+        }
+        None => {
+            let mut out: Vec<(String, McpServerConfig)> = cfg
+                .tools
+                .mcp_servers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if should_auto_register_self_mcp(cfg, &|key| std::env::var(key).ok()) {
+                out.push(synthesize_self_mcp_server());
+            }
+            out
+        }
+    };
+
+    let mut per_server_chunks: Vec<(String, ToolRegistry)> = Vec::with_capacity(candidates.len());
+    for (name, server) in &candidates {
+        report.attempted.push(name.clone());
+        let mut chunk = ToolRegistry::new();
+        register_one_mcp_server(&mut chunk, name, server).await;
+        let prefix = format!("mcp_{name}_");
+        let stub_name = format!("mcp_{name}_login_required");
+        let registered_count = chunk
+            .names()
+            .filter(|n| n.starts_with(&prefix) || *n == stub_name)
+            .count();
+        if registered_count == 0 {
+            report.failed.push((
+                name.clone(),
+                format!(
+                    "server `{name}` registered no tools \
+                     (see logs for connect/list/auth errors)"
+                ),
+            ));
+        } else {
+            report.succeeded.push(name.clone());
+        }
+        per_server_chunks.push((name.clone(), chunk));
+    }
+
+    {
+        let mut w = registry.write().expect("zunel tool registry lock poisoned");
+        for (name, _) in &per_server_chunks {
+            let prefix = format!("mcp_{name}_");
+            let stub_name = format!("mcp_{name}_login_required");
+            w.retain(|tool_name| !tool_name.starts_with(&prefix) && tool_name != stub_name);
+        }
+        for (_, chunk) in per_server_chunks {
+            w.extend(chunk);
+        }
+    }
+
+    report
+}
+
+/// Periodic auto-reconnect: walk every user-configured MCP server,
+/// reload only the ones that look unhealthy (no `mcp_<name>_*`
+/// tools and no `mcp_<name>_login_required` stub), and return the
+/// merged [`ReloadReport`] for logging.
+///
+/// "Unhealthy" deliberately excludes the OAuth auth-required stub
+/// case — those need a chat-driven `mcp_login_complete` (or
+/// `zunel mcp login --force`), not a periodic re-dial.
+///
+/// Healthy servers are skipped so the periodic tick is a near-no-op
+/// once everything's connected. The synthesized `zunel_self` entry
+/// is also skipped: it spawns the parent binary, which doesn't fail
+/// in production and would otherwise generate test/CI noise.
+pub async fn reconnect_unhealthy_mcp_servers(
+    registry: &Arc<RwLock<ToolRegistry>>,
+    cfg: &Config,
+) -> ReloadReport {
+    let unhealthy: Vec<String> = {
+        let r = registry.read().expect("zunel tool registry lock poisoned");
+        cfg.tools
+            .mcp_servers
+            .keys()
+            .filter(|name| is_mcp_server_unhealthy(&r, name))
+            .cloned()
+            .collect()
+    };
+
+    let mut report = ReloadReport::default();
+    for name in &unhealthy {
+        let single = reload_mcp_servers(registry, cfg, Some(name)).await;
+        report.attempted.extend(single.attempted);
+        report.succeeded.extend(single.succeeded);
+        report.failed.extend(single.failed);
+    }
+    report
+}
+
+/// Decide whether the periodic auto-reconnect should retry this
+/// server. "Unhealthy" means no `mcp_<name>_<tool>` tools registered
+/// AND no `mcp_<name>_login_required` stub. The stub case is
+/// excluded because it indicates a credentials issue that periodic
+/// re-dials can't resolve — the chat-driven login skill or
+/// `zunel mcp login --force` is the right escape hatch.
+fn is_mcp_server_unhealthy(registry: &ToolRegistry, server_name: &str) -> bool {
+    let prefix = format!("mcp_{server_name}_");
+    let stub = format!("mcp_{server_name}_login_required");
+    let has_real_tools = registry
+        .names()
+        .any(|n| n.starts_with(&prefix) && n != stub);
+    let has_login_stub = registry.get(&stub).is_some();
+    !has_real_tools && !has_login_stub
 }
 
 /// Decide whether `register_mcp_tools` should synthesize the

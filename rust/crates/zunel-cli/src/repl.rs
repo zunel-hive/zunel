@@ -174,7 +174,7 @@ async fn dispatch_line(
         return Ok(LineFlow::Continue);
     }
     if line.starts_with('/') {
-        handle_command(router, session_key, line, sessions).await
+        handle_command(router, agent_loop, session_key, line, sessions).await
     } else {
         run_turn(agent_loop, session_key, line, show_footer).await?;
         Ok(LineFlow::Continue)
@@ -183,6 +183,7 @@ async fn dispatch_line(
 
 async fn handle_command(
     router: &CommandRouter,
+    agent_loop: &AgentLoop,
     session_key: &str,
     line: &str,
     sessions: &SessionManager,
@@ -207,11 +208,43 @@ async fn handle_command(
         }
         Some(CommandOutcome::Exit) => Ok(LineFlow::Exit),
         Some(CommandOutcome::Restart) => Ok(LineFlow::Restart),
+        Some(CommandOutcome::ReloadMcp { target }) => {
+            match agent_loop.reload_mcp(target.as_deref(), None).await {
+                Ok(report) => println!("{}", format_reload_report(&report)),
+                Err(err) => println!("Reload failed: {err}"),
+            }
+            Ok(LineFlow::Continue)
+        }
         None => {
             println!("Unknown command: {line}. Try /help.");
             Ok(LineFlow::Continue)
         }
     }
+}
+
+/// Render a [`zunel_core::ReloadReport`] as the multi-line summary
+/// `/reload` prints to stdout. Kept separate so it can be unit
+/// tested without spinning up a REPL or any IO.
+fn format_reload_report(report: &zunel_core::ReloadReport) -> String {
+    if report.attempted.is_empty() {
+        return "Reload: no MCP servers configured.".into();
+    }
+    let mut out = String::new();
+    out.push_str(&format!("Reload: attempted {}", report.attempted.len()));
+    if !report.succeeded.is_empty() {
+        out.push_str(&format!(
+            ", succeeded {} ({})",
+            report.succeeded.len(),
+            report.succeeded.join(", "),
+        ));
+    }
+    if !report.failed.is_empty() {
+        out.push_str(&format!(", failed {}:", report.failed.len()));
+        for (server, err) in &report.failed {
+            out.push_str(&format!("\n  - {server}: {err}"));
+        }
+    }
+    out
 }
 
 async fn run_turn(

@@ -23,12 +23,39 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    /// Drop a single tool by name. Returns the previously-registered
+    /// `DynTool` so the caller can confirm something was actually
+    /// removed (or `None` if no matching name was registered). Used
+    /// by the SDK facade and by the MCP reload path's targeted
+    /// "drop just this server's tools" step.
+    pub fn unregister(&mut self, name: &str) -> Option<DynTool> {
+        self.tools.remove(name)
+    }
+
     pub fn get(&self, name: &str) -> Option<&DynTool> {
         self.tools.get(name)
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.tools.keys().map(String::as_str)
+    }
+
+    /// Drop every tool whose name does not satisfy `keep`. Used by the
+    /// MCP reload path to evict tools belonging to the server(s) being
+    /// reconnected before the freshly listed tools are merged in.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&str) -> bool,
+    {
+        self.tools.retain(|k, _| keep(k));
+    }
+
+    /// Move every tool from `other` into `self`, overwriting on name
+    /// collision. Used by the MCP reload path to splice a freshly
+    /// connected server's tools into the live registry under a single
+    /// brief write lock.
+    pub fn extend(&mut self, other: ToolRegistry) {
+        self.tools.extend(other.tools);
     }
 
     /// Tool definitions in OpenAI function-call format, with `mcp_*`

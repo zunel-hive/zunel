@@ -832,6 +832,33 @@ Because outbound requests re-read `token.json` per call, a successful refresh
 in this loop is picked up by the next MCP request without restarting the
 gateway.
 
+#### Background auto-reconnect
+
+Both `zunel gateway` and the `zunel agent` REPL run a periodic
+**auto-reconnect** task that retries any MCP server that isn't currently
+serving tools. The motivating case: an MCP backend (a Docker container, a
+remote service) was unreachable when the runtime first booted, so
+`register_mcp_tools` couldn't list its tools. Once it's healthy again the
+auto-reconnect tick splices its tools into the live registry — no
+`/reload`, no restart.
+
+The task only retries servers that are configured but missing from the
+registry. Servers showing the `mcp_<name>_login_required` stub are skipped
+on purpose; those need a chat-driven `mcp_login_complete` (or
+`zunel mcp login --force`), which periodic re-dials cannot fix.
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `ZUNEL_MCP_RECONNECT_TICK_SECS` | `300` (5 min) | Tick interval for the auto-reconnect task. |
+| `ZUNEL_MCP_RECONNECT_DISABLED` | unset | Set to `1`/`true`/`yes` to skip spawning the task entirely. |
+
+Successful reconnects log at INFO; persistent failures log at WARN on every
+tick so operators can spot a server that's permanently down.
+
+For one-off forced reloads from a session, use the `/reload` slash command
+(CLI) or ask the agent to call the `mcp_reconnect` tool (Slack and other
+non-CLI channels). See [`chat-commands.md`](chat-commands.md).
+
 ### Slack user MCP (read as you)
 
 zunel ships a local, read-only Slack MCP server that authenticates as **you**

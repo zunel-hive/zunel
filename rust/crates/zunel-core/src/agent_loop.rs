@@ -1,5 +1,6 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -13,12 +14,19 @@ use crate::approval::{
     AllowAllApprovalHandler, ApprovalHandler, ApprovalScope, BusApprovalHandler,
 };
 use crate::compaction::CompactionService;
+use crate::default_tools::{reload_mcp_servers, ReloadReport};
 use crate::document::extract_documents;
 use crate::error::Result;
 use crate::runner::{AgentRunSpec, AgentRunner, TrimBudgets};
 use crate::session::{ChatRole, Session, SessionManager};
 use crate::trim::chat_message_to_value;
 use zunel_tools::ToolRegistry;
+
+/// Shared, hot-swappable tool registry handle. Wrapped in
+/// `Arc<RwLock<...>>` so MCP reload (`AgentLoop::reload_mcp` and the
+/// `mcp_reconnect` native tool) can splice in / drop tools while the
+/// agent loop continues to read snapshots on each turn.
+pub type SharedToolRegistry = Arc<RwLock<ToolRegistry>>;
 
 /// Outcome of a single agent turn.
 ///
@@ -59,7 +67,7 @@ pub struct AgentLoop {
     provider: Arc<dyn LLMProvider>,
     defaults: AgentDefaults,
     sessions: Option<Arc<SessionManager>>,
-    tools: ToolRegistry,
+    tools: SharedToolRegistry,
     approval: Arc<dyn ApprovalHandler>,
     approval_required: bool,
     approval_scope: ApprovalScope,
@@ -109,7 +117,7 @@ impl AgentLoop {
             provider,
             defaults,
             sessions: None,
-            tools: ToolRegistry::new(),
+            tools: Arc::new(RwLock::new(ToolRegistry::new())),
             approval: Arc::new(AllowAllApprovalHandler),
             approval_required: false,
             approval_scope: ApprovalScope::default(),
@@ -129,7 +137,7 @@ impl AgentLoop {
             provider,
             defaults,
             sessions: Some(Arc::new(sessions)),
-            tools: ToolRegistry::new(),
+            tools: Arc::new(RwLock::new(ToolRegistry::new())),
             approval: Arc::new(AllowAllApprovalHandler),
             approval_required: false,
             approval_scope: ApprovalScope::default(),
@@ -139,8 +147,21 @@ impl AgentLoop {
         }
     }
 
-    /// Slice 3 — inject a tool registry + approval handler.
+    /// Slice 3 — inject a tool registry + approval handler. Wraps the
+    /// supplied registry in a fresh `Arc<RwLock<...>>`. Callers that
+    /// need to share the live registry handle with another consumer
+    /// (e.g. the `mcp_reconnect` native tool) should use
+    /// [`AgentLoop::with_tools_arc`] instead.
     pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
+        self.tools = Arc::new(RwLock::new(tools));
+        self
+    }
+
+    /// Inject a pre-built shared registry handle. Use this when the
+    /// caller (CLI / gateway) already shares the registry with another
+    /// component such as the `mcp_reconnect` tool that needs to splice
+    /// MCP entries in/out at runtime.
+    pub fn with_tools_arc(mut self, tools: SharedToolRegistry) -> Self {
         self.tools = tools;
         self
     }
@@ -183,12 +204,62 @@ impl AgentLoop {
         self
     }
 
-    pub fn tools(&self) -> &ToolRegistry {
-        &self.tools
+    /// Read-only handle to the live tool registry. Returns a guard
+    /// that derefs to `&ToolRegistry`, so existing call sites like
+    /// `agent.tools().get("foo")` and `agent.tools().names()` keep
+    /// working unchanged. The guard is held for the duration of the
+    /// expression — keep it short (don't bind to a long-lived `let`)
+    /// or you'll block reload.
+    pub fn tools(&self) -> RwLockReadGuard<'_, ToolRegistry> {
+        self.tools
+            .read()
+            .expect("zunel tool registry lock poisoned")
+    }
+
+    /// Clone the shared registry handle so a side component (notably
+    /// the `mcp_reconnect` native tool) can read or mutate the same
+    /// `ToolRegistry` the agent loop reads from on each turn.
+    pub fn tools_handle(&self) -> SharedToolRegistry {
+        Arc::clone(&self.tools)
     }
 
     pub fn register_tool(&mut self, tool: Arc<dyn zunel_tools::Tool>) {
-        self.tools.register(tool);
+        self.tools
+            .write()
+            .expect("zunel tool registry lock poisoned")
+            .register(tool);
+    }
+
+    /// Drop a tool by name. Returns `true` if a matching tool was
+    /// removed, `false` if no tool with that name was registered.
+    /// Subsequent turns no longer see the tool in the function-call
+    /// schema sent to the provider.
+    pub fn unregister_tool(&mut self, name: &str) -> bool {
+        self.tools
+            .write()
+            .expect("zunel tool registry lock poisoned")
+            .unregister(name)
+            .is_some()
+    }
+
+    /// Reload MCP servers from disk and splice the freshly listed
+    /// tools into the live registry. `target = None` reloads every
+    /// configured server (matching boot-time `register_mcp_tools`
+    /// behavior); `target = Some(name)` reloads a single one.
+    /// `config_path = None` reads `<zunel_home>/config.json`. The
+    /// caller is responsible for surfacing the [`ReloadReport`] to
+    /// the user.
+    ///
+    /// Network I/O happens off-lock — the live registry is only
+    /// briefly write-locked at the end to atomically swap entries —
+    /// so concurrent turns never block on reload.
+    pub async fn reload_mcp(
+        &self,
+        target: Option<&str>,
+        config_path: Option<&Path>,
+    ) -> std::result::Result<ReloadReport, zunel_config::Error> {
+        let cfg = zunel_config::load_config(config_path)?;
+        Ok(reload_mcp_servers(&self.tools, &cfg, target).await)
     }
 
     fn settings(&self) -> GenerationSettings {
@@ -349,7 +420,17 @@ impl AgentLoop {
             "agent_loop: streaming",
         );
 
-        let runner = AgentRunner::new(self.provider.clone(), self.tools.clone(), approval);
+        // Snapshot the registry under a brief read lock. Cloning a
+        // `ToolRegistry` only bumps Arc counts on the wrapped tools,
+        // so this is cheap; doing it once per turn lets the
+        // `mcp_reconnect` native tool (or `/reload`) splice tools
+        // in/out concurrently without disturbing in-flight turns.
+        let tools_snapshot = self
+            .tools
+            .read()
+            .expect("zunel tool registry lock poisoned")
+            .clone();
+        let runner = AgentRunner::new(self.provider.clone(), tools_snapshot, approval);
         let result = runner
             .run(
                 AgentRunSpec {

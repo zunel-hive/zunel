@@ -11,15 +11,15 @@
 //! ```
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use tokio::sync::mpsc;
 
 pub use zunel_config::{Config, Error as ConfigError};
 pub use zunel_core::{
     AgentLoop, ApprovalDecision, ApprovalHandler, ApprovalRequest, ApprovalScope, ChatRole,
-    CommandContext, CommandOutcome, CommandRouter, Error as CoreError, RunResult,
-    RuntimeSelfStateProvider, Session, SessionManager, SubagentManager,
+    CommandContext, CommandOutcome, CommandRouter, Error as CoreError, ReloadReport, RunResult,
+    RuntimeSelfStateProvider, Session, SessionManager, SharedToolRegistry, SubagentManager,
 };
 pub use zunel_providers::{Error as ProviderError, LLMProvider, StreamEvent, ToolProgress};
 pub use zunel_skills::{Skill, SkillsLoader};
@@ -69,6 +69,7 @@ impl Zunel {
         )));
         let mut tool_names: Vec<String> = registry.names().map(str::to_string).collect();
         tool_names.push("self".into());
+        tool_names.push("mcp_reconnect".into());
         registry.register(Arc::new(zunel_tools::self_tool::SelfTool::from_provider(
             Arc::new(RuntimeSelfStateProvider {
                 model: cfg.agents.defaults.model.clone(),
@@ -84,16 +85,35 @@ impl Zunel {
                 subagents,
             }),
         )));
+        // Wrap in a shared handle so `mcp_reconnect` mutates the same
+        // registry the agent loop reads from on every turn. The
+        // facade forwards the user-supplied `config_path` to the
+        // tool so subsequent `agent.mcp_reconnect` calls re-read the
+        // exact file the SDK consumer pointed at on construction.
+        let shared_registry = Arc::new(RwLock::new(registry));
+        {
+            let mut w = shared_registry
+                .write()
+                .expect("zunel tool registry lock poisoned");
+            w.register(Arc::new(zunel_core::mcp_reconnect::McpReconnectTool::new(
+                Arc::clone(&shared_registry),
+                path.map(Path::to_path_buf),
+            )));
+        }
         let inner = AgentLoop::with_sessions(provider, cfg.agents.defaults.clone(), sessions)
-            .with_tools(registry)
+            .with_tools_arc(shared_registry)
             .with_workspace(workspace);
         Ok(Self { inner })
     }
 
     /// Read-only access to the registered tool set. Includes both the
     /// defaults seeded by `from_config` and anything later registered
-    /// via [`Self::register_tool`].
-    pub fn tools(&self) -> &ToolRegistry {
+    /// via [`Self::register_tool`]. Returns a `RwLockReadGuard` that
+    /// derefs to `&ToolRegistry`, so call sites like
+    /// `bot.tools().get("foo")` continue to work; the guard is held
+    /// for the duration of the calling expression and should not be
+    /// bound to a long-lived `let` (it will block runtime MCP reload).
+    pub fn tools(&self) -> RwLockReadGuard<'_, ToolRegistry> {
         self.inner.tools()
     }
 
@@ -101,6 +121,32 @@ impl Zunel {
     /// it in the function-call schema sent to the provider.
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         self.inner.register_tool(tool);
+    }
+
+    /// Drop a previously-registered tool by name. Returns `true` if
+    /// the registry contained a matching tool, `false` otherwise.
+    /// Useful for tearing down an SDK-injected tool without
+    /// rebuilding the whole `Zunel` instance.
+    pub fn unregister_tool(&mut self, name: &str) -> bool {
+        self.inner.unregister_tool(name)
+    }
+
+    /// Reload MCP servers from disk and splice the freshly listed
+    /// tools into the live registry. See
+    /// [`AgentLoop::reload_mcp`] for details.
+    pub async fn reload_mcp(
+        &self,
+        target: Option<&str>,
+        config_path: Option<&Path>,
+    ) -> Result<ReloadReport> {
+        Ok(self.inner.reload_mcp(target, config_path).await?)
+    }
+
+    /// Shared handle to the live tool registry. Use this to plumb
+    /// the registry into a side component (e.g. an `mcp_reconnect`
+    /// tool) that needs to splice MCP entries in/out at runtime.
+    pub fn tools_handle(&self) -> SharedToolRegistry {
+        self.inner.tools_handle()
     }
 
     /// One-shot: run a single prompt with no session persistence.

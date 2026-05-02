@@ -181,6 +181,25 @@ channels: 1
 `channels` is the number of configured built-in gateway channels. It is `1`
 when `channels.slack` is present in `config.json`, otherwise `0`.
 
+## Interactive Slash Commands
+
+Inside `zunel agent`'s REPL, lines that start with `/` are dispatched
+locally instead of being sent to the LLM:
+
+| Command | Description |
+|---------|-------------|
+| `/help` | List the supported slash commands |
+| `/clear` | Truncate the current session to its metadata header |
+| `/status` | Print the active model and the current session's message count |
+| `/reload` | Re-discover every configured MCP server and splice the freshly listed tools into the live registry. Use this after restarting an MCP backend (or editing `~/.zunel/config.json`) — no `/restart` needed. |
+| `/reload <server>` | Same, but only for one MCP server name |
+| `/restart` | `exec()` the current process with the same arguments |
+| `/exit` / `/quit` | Leave the REPL |
+
+Slack and other channels don't process slash commands directly — ask
+the agent in plain language and it will call the matching native tool
+(`mcp_reconnect` for the reload flow). See [`chat-commands.md`](chat-commands.md).
+
 ## Interactive Exit Shortcuts
 
 Interactive mode exits on any of:

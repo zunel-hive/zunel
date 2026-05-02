@@ -111,3 +111,51 @@ fn builtin_register_defaults_wires_exit_and_quit() {
         }
     }
 }
+
+/// `/reload` with no argument should request a full reload (target =
+/// `None`); `/reload <server>` should target one server. Pin both
+/// shapes — the CLI REPL uses this enum to decide whether to call
+/// `AgentLoop::reload_mcp(None, ..)` or `Some(name)`.
+#[test]
+fn builtin_register_defaults_wires_reload() {
+    use zunel_core::command::builtins::register_defaults;
+    let mut router = CommandRouter::new();
+    register_defaults(&mut router);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let ctx_all = CommandContext {
+        session_key: "cli:direct".into(),
+        raw: "/reload".into(),
+        args: String::new(),
+    };
+    match rt.block_on(router.dispatch(&ctx_all)).unwrap() {
+        Some(CommandOutcome::ReloadMcp { target }) => assert!(target.is_none()),
+        other => panic!("expected ReloadMcp(None) for /reload, got: {other:?}"),
+    }
+
+    let ctx_one = CommandContext {
+        session_key: "cli:direct".into(),
+        raw: "/reload redlab".into(),
+        args: String::new(),
+    };
+    match rt.block_on(router.dispatch(&ctx_one)).unwrap() {
+        Some(CommandOutcome::ReloadMcp { target }) => {
+            assert_eq!(target.as_deref(), Some("redlab"));
+        }
+        other => panic!("expected ReloadMcp(Some(redlab)) for /reload redlab, got: {other:?}"),
+    }
+}
+
+/// Help text must list `/reload` so users discover it via `/help`.
+#[test]
+fn builtin_help_lists_reload() {
+    use zunel_core::command::builtins::help_text;
+    assert!(
+        help_text().contains("/reload"),
+        "help text missing `/reload`:\n{}",
+        help_text()
+    );
+}
