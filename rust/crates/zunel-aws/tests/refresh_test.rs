@@ -18,9 +18,17 @@ use zunel_aws::sso_refresh::{
     refresh_profile_if_near_expiry, RefreshContext, RefreshError, RefreshOutcome,
 };
 
-/// Write a fake `aws` script that, regardless of argv, prints the given
-/// stdout/stderr and exits with the given code. Returns the path so the
-/// caller can hand it to [`RefreshContext::with_aws_bin`].
+/// Write a fake `aws` script that asserts it was invoked with the
+/// expected argv (`configure export-credentials --profile <p> --format
+/// process`), then prints the given stdout/stderr and exits with the
+/// given code. Returns the path so the caller can hand it to
+/// [`RefreshContext::with_aws_bin`].
+///
+/// The argv assertion is critical: AWS CLI v2 rejects `--format json`
+/// (the value we naively shipped first), so a stub that ignored argv
+/// silently let an integration regression slip past tests. By making
+/// the stub `exit 64` on argv mismatch, any future drift in the call
+/// shape produces a loud `AwsCommandFailed` test failure instead.
 ///
 /// We bake the canned bytes into separate files and have the script
 /// `cat` them so multi-line / quote-heavy fixtures don't have to be
@@ -36,7 +44,17 @@ fn write_aws_stub(dir: &Path, exit_code: i32, stdout_body: &str, stderr_body: &s
     let mut f = fs::File::create(&script_path).unwrap();
     writeln!(
         f,
-        "#!/bin/bash\ncat {}\ncat {} >&2\nexit {}",
+        "#!/bin/bash
+# Reject any argv that doesn't match what zunel-aws is supposed to send.
+if [ \"$1\" != \"configure\" ] || [ \"$2\" != \"export-credentials\" ] \\
+   || [ \"$3\" != \"--profile\" ] || [ -z \"$4\" ] \\
+   || [ \"$5\" != \"--format\" ] || [ \"$6\" != \"process\" ]; then
+  echo \"aws-stub: unexpected argv: $*\" >&2
+  exit 64
+fi
+cat {}
+cat {} >&2
+exit {}",
         shell_escape(&stdout_file),
         shell_escape(&stderr_file),
         exit_code,

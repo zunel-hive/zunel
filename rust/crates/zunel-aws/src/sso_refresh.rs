@@ -200,13 +200,17 @@ pub async fn refresh_profile_if_near_expiry(
     profile: &str,
     if_near_expiry: Option<i64>,
 ) -> RefreshResult<RefreshOutcome> {
+    // `--format process` (NOT `--format json`) is the AWS CLI v2
+    // option that emits the standard `process-credentials` JSON
+    // shape we parse below. AWS CLI v2.13+ rejects `--format json`
+    // outright; older v1 builds never supported it either.
     let output = Command::new(&ctx.aws_bin)
         .arg("configure")
         .arg("export-credentials")
         .arg("--profile")
         .arg(profile)
         .arg("--format")
-        .arg("json")
+        .arg("process")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
