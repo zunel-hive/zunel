@@ -12,6 +12,7 @@ pub struct Config {
     pub gateway: GatewayConfig,
     pub tools: ToolsConfig,
     pub cli: CliConfig,
+    pub aws: AwsConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -75,6 +76,26 @@ impl Default for ChannelsConfig {
             slack: None,
         }
     }
+}
+
+/// AWS SSO auto-refresh configuration. Consumed by the gateway-side
+/// task spawned in `zunel-cli/src/commands/gateway.rs`. An empty (or
+/// absent) `sso_profiles` list disables the loop entirely with zero
+/// cost — gateways that don't use AWS pay nothing.
+///
+/// Initial `aws sso login --profile <p>` is still a one-time manual
+/// browser step. This loop only keeps already-logged-in profiles alive
+/// by periodically calling `aws configure export-credentials`, which
+/// transparently refreshes both the OIDC SSO access token and the
+/// per-role STS credentials cached under `~/.aws/`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AwsConfig {
+    /// SSO profiles whose credentials the gateway should keep
+    /// refreshed. Each entry must match a `[profile <name>]` section
+    /// in `~/.aws/config` that uses `sso_session` (or the legacy
+    /// `sso_start_url` shape).
+    pub sso_profiles: Vec<String>,
 }
 
 /// CLI-side preferences that affect the local terminal experience but

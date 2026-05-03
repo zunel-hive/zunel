@@ -24,6 +24,7 @@ fn config_with_custom() -> Config {
         gateway: Default::default(),
         tools: Default::default(),
         cli: Default::default(),
+        ..Default::default()
     }
 }
 

@@ -22,10 +22,10 @@ pub use profile::{
     resolve_profile_home, set_sticky_profile, DEFAULT_PROFILE_NAME,
 };
 pub use schema::{
-    AgentDefaults, AgentsConfig, ChannelsConfig, CliConfig, CodexProvider, Config, CustomProvider,
-    DreamConfig, ExecToolsConfig, FilesystemToolsConfig, GatewayConfig, HeartbeatConfig,
-    McpOAuthConfig, McpServerConfig, ProvidersConfig, SlackChannelConfig, SlackDmConfig,
-    ToolsConfig, WebToolsConfig, DEFAULT_COMPACTION_KEEP_TAIL, DEFAULT_CONTEXT_WINDOW_TOKENS,
-    DEFAULT_MAX_TOKENS_FALLBACK, DEFAULT_SESSION_HISTORY_WINDOW, DEFAULT_TOOL_RESULT_BUDGET_CHARS,
-    HISTORY_BUDGET_HEADROOM_TOKENS,
+    AgentDefaults, AgentsConfig, AwsConfig, ChannelsConfig, CliConfig, CodexProvider, Config,
+    CustomProvider, DreamConfig, ExecToolsConfig, FilesystemToolsConfig, GatewayConfig,
+    HeartbeatConfig, McpOAuthConfig, McpServerConfig, ProvidersConfig, SlackChannelConfig,
+    SlackDmConfig, ToolsConfig, WebToolsConfig, DEFAULT_COMPACTION_KEEP_TAIL,
+    DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS_FALLBACK, DEFAULT_SESSION_HISTORY_WINDOW,
+    DEFAULT_TOOL_RESULT_BUDGET_CHARS, HISTORY_BUDGET_HEADROOM_TOKENS,
 };

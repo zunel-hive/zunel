@@ -3853,6 +3853,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zunel-aws"
+version = "0.2.12"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "zunel-bus"
 version = "0.2.12"
 dependencies = [
@@ -3909,6 +3922,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+ "zunel-aws",
  "zunel-bus",
  "zunel-channels",
  "zunel-config",

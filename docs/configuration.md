@@ -386,6 +386,58 @@ loop run by the gateway's background scheduler:
 | `heartbeat.intervalS` | `1800` (30 min) | Minimum seconds between heartbeat fires. The scheduler ticks every 30s and fires when `now - last_heartbeat_at >= intervalS`; the timestamp is persisted to `<workspace>/.zunel/scheduler.json` |
 | `heartbeat.keepRecentMessages` | `8` | Trailing message count handed to `HeartbeatService` when summarizing session activity |
 
+## AWS SSO Auto-Refresh
+
+When the gateway's agent tools shell out to AWS (e.g. `aws s3 cp`, `aws
+ec2 describe-instances`, anything via `tools.exec`), they read the same
+SSO-cached credentials the AWS CLI maintains under `~/.aws/`. Those
+credentials expire on two cadences: per-role STS creds typically every
+hour, and the SSO access token itself every 8–12h. Without a daemon
+nudging them, the first AWS-touching tool call after the cache expires
+fails until you re-run `aws sso login`.
+
+`zunel gateway` ships a built-in refresh loop that, for each profile in
+`aws.ssoProfiles`, periodically invokes `aws configure
+export-credentials --profile <p> --format json`. The AWS CLI is the
+orchestrator: it transparently re-uses the cached SSO access token,
+runs the OIDC `refresh_token` grant when the token is near expiry, calls
+`sso:GetRoleCredentials`, and rewrites the cache files. zunel just
+parses the returned `Expiration` for log-level routing and never touches
+`~/.aws/` itself, so it stays version-correct across `sso_session` and
+legacy `sso_start_url` profile shapes.
+
+```json
+{
+  "aws": {
+    "ssoProfiles": ["dev", "prod"]
+  }
+}
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `aws.ssoProfiles` | `[]` | List of profile names matching `[profile <name>]` sections in `~/.aws/config`. Empty / missing disables the loop entirely with zero cost. |
+
+The initial `aws sso login --profile <p>` is still a one-time manual
+browser step. The loop only keeps already-logged-in profiles alive; if
+the SSO session itself ages out (typically after 8–12h of idleness, or
+when the IdP enforces a hard re-auth window), the loop logs at WARN
+with `re-run aws sso login --profile <p>` and keeps polling. Once you
+re-auth in another terminal, the next tick succeeds — no gateway
+restart required.
+
+### Gateway env vars (operator overrides)
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `ZUNEL_AWS_REFRESH_DISABLED` | unset | When `1` / `true` / `yes`, skips spawning the loop entirely. |
+| `ZUNEL_AWS_REFRESH_TICK_SECS` | `600` | Seconds between refresh checks. Default 10 min — comfortably below the 1h role-cred lifetime. |
+| `ZUNEL_AWS_REFRESH_WINDOW_SECS` | `900` | Refresh window. When the cached `Expiration` is more than this many seconds away, the tick logs at `debug`; inside the window it logs at `info`. The AWS CLI itself decides whether to actually mint new creds, regardless of this value. |
+| `ZUNEL_AWS_BIN` | `aws` | Path to the AWS CLI binary. Override when `aws` isn't on `PATH` or you need to pin a specific version. |
+
+The same loop is a no-op when `aws.ssoProfiles` is empty, so users who
+don't use AWS pay nothing.
+
 ## Session Hygiene
 
 Long-lived chat sessions (especially Slack DMs that stay open for weeks)

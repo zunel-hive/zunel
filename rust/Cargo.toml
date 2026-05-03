@@ -11,6 +11,7 @@ members = [
     "crates/zunel-tools",
     "crates/zunel-mcp",
     "crates/zunel-channels",
+    "crates/zunel-aws",
     "crates/zunel-cron",
     "crates/zunel-heartbeat",
     "crates/zunel-mcp-slack",
@@ -86,6 +87,7 @@ zunel-mcp = { path = "crates/zunel-mcp", version = "=0.2.12" }
 zunel-mcp-self = { path = "crates/zunel-mcp-self", version = "=0.2.12" }
 zunel-mcp-slack = { path = "crates/zunel-mcp-slack", version = "=0.2.12" }
 zunel-channels = { path = "crates/zunel-channels", version = "=0.2.12" }
+zunel-aws = { path = "crates/zunel-aws", version = "=0.2.12" }
 zunel-cron = { path = "crates/zunel-cron", version = "=0.2.12" }
 zunel-heartbeat = { path = "crates/zunel-heartbeat", version = "=0.2.12" }
 zunel-core = { path = "crates/zunel-core", version = "=0.2.12" }

@@ -23,7 +23,7 @@ These flags work on every subcommand:
 | `zunel agent -m "..."` | Run a one-shot prompt |
 | `zunel agent --session <channel:chat_id>` | Use a specific session key |
 | `zunel agent --show-tokens` | Print the token-usage footer after each assistant reply, regardless of `cli.showTokenFooter`. See [Tokens](#tokens) |
-| `zunel gateway` | Start the Slack-backed gateway |
+| `zunel gateway` | Start the Slack-backed gateway. Spawns the in-runtime Slack bot-token refresh, MCP OAuth refresh, MCP auto-reconnect, and AWS SSO auto-refresh loops alongside the channel runtime. AWS SSO refresh is opt-in via `aws.ssoProfiles`; tunable via `ZUNEL_AWS_REFRESH_TICK_SECS` / `ZUNEL_AWS_REFRESH_WINDOW_SECS` / `ZUNEL_AWS_REFRESH_DISABLED` / `ZUNEL_AWS_BIN`. See [AWS SSO Auto-Refresh](configuration.md#aws-sso-auto-refresh) in `configuration.md`. |
 | `zunel gateway --dry-run` | Validate gateway config without connecting channels |
 | `zunel status` | Show provider, model, workspace, and configured channel count |
 | `zunel channels status` | Show channel status |

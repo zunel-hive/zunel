@@ -40,6 +40,7 @@ fn config_with_base(api_base: String) -> Config {
         gateway: Default::default(),
         tools: Default::default(),
         cli: Default::default(),
+        ..Default::default()
     }
 }
 

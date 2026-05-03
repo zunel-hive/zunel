@@ -3,6 +3,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use zunel_aws::sso_refresh::{
+    refresh_profile_if_near_expiry, RefreshContext as AwsRefreshContext,
+    RefreshError as AwsRefreshError, RefreshOutcome as AwsRefreshOutcome,
+};
 use zunel_bus::MessageBus;
 use zunel_channels::build_channel_manager;
 use zunel_channels::slack::bot_refresh::{
@@ -36,6 +40,22 @@ const MCP_REFRESH_DEFAULT_TICK_SECS: u64 = 1800;
 /// case). Tunable via `ZUNEL_MCP_RECONNECT_TICK_SECS`; set
 /// `ZUNEL_MCP_RECONNECT_DISABLED=1` to opt out.
 const MCP_RECONNECT_DEFAULT_TICK_SECS: u64 = 300;
+
+/// Wake up every 10 minutes to walk every `aws.ssoProfiles` entry and
+/// invoke `aws configure export-credentials --profile <p>`, which in
+/// turn refreshes the OIDC SSO access token and the per-role STS
+/// credentials cached under `~/.aws/`. Tunable via
+/// `ZUNEL_AWS_REFRESH_TICK_SECS` / `ZUNEL_AWS_REFRESH_WINDOW_SECS`;
+/// set `ZUNEL_AWS_REFRESH_DISABLED=1` to opt out entirely.
+///
+/// Default tick (10 min) and window (15 min) are sized for the typical
+/// SSO role-credential lifetime (~1h): the loop fires often enough to
+/// catch credentials inside the refresh window before any AWS-using
+/// agent tool would notice them stale, but rarely enough that the
+/// per-tick subprocess cost (one `aws` invocation per profile) is
+/// negligible.
+const AWS_REFRESH_DEFAULT_TICK_SECS: u64 = 600;
+const AWS_REFRESH_DEFAULT_WINDOW_SECS: i64 = 900;
 
 pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
     let cfg = zunel_config::load_config(config_path).with_context(|| "loading zunel config")?;
@@ -133,6 +153,7 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
     let bot_refresh_task = spawn_bot_refresh_task(config_path, slack_bot_token_handle);
     let mcp_refresh_task = spawn_mcp_refresh_task(config_path);
     let mcp_reconnect_task = spawn_mcp_reconnect_task(agent_loop.tools_handle(), config_path);
+    let aws_refresh_task = spawn_aws_refresh_task(config_path);
 
     tokio::signal::ctrl_c()
         .await
@@ -153,6 +174,9 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
         handle.abort();
     }
     if let Some(handle) = mcp_reconnect_task {
+        handle.abort();
+    }
+    if let Some(handle) = aws_refresh_task {
         handle.abort();
     }
     Ok(())
@@ -526,6 +550,112 @@ fn log_mcp_refresh_outcome(server: &str, outcome: zunel_mcp::OAuthRefreshOutcome
                 error = %err,
                 "MCP OAuth refresh tick failed; will retry on next tick"
             );
+        }
+    }
+}
+
+/// Periodic in-runtime AWS SSO credential refresh.
+///
+/// Sibling of [`spawn_bot_refresh_task`] / [`spawn_mcp_refresh_task`]:
+/// every `ZUNEL_AWS_REFRESH_TICK_SECS` seconds (default 10 min) the
+/// task walks `cfg.aws.ssoProfiles` and invokes `aws configure
+/// export-credentials --profile <p>` per profile. The AWS CLI handles
+/// the OIDC `refresh_token` grant + `sso:GetRoleCredentials` + cache
+/// rewrite under `~/.aws/`, so any AWS-using tool spawned from the
+/// gateway (e.g. `exec` running `aws s3 cp`) sees fresh credentials
+/// without a manual `aws sso login` mid-day.
+///
+/// Returns `None` when:
+/// - `ZUNEL_AWS_REFRESH_DISABLED` is set to anything truthy
+///   (`1`, `true`, …) — operators who want full external control.
+/// - The config can't be loaded — surface a warn and back off so
+///   gateway startup keeps succeeding.
+/// - `cfg.aws.sso_profiles` is empty (the default), meaning the
+///   user hasn't opted into AWS SSO refresh at all. Pure no-op.
+///
+/// Failures inside the loop are logged at WARN and never crash the
+/// gateway. Specifically, `SsoSessionExpired` keeps the profile in the
+/// rotation: once the user re-runs `aws sso login --profile <p>` in
+/// another terminal, the very next tick succeeds — no gateway restart
+/// required.
+fn spawn_aws_refresh_task(config_path: Option<&Path>) -> Option<tokio::task::JoinHandle<()>> {
+    if env_disabled("ZUNEL_AWS_REFRESH_DISABLED") {
+        tracing::info!("in-runtime AWS SSO refresh disabled via ZUNEL_AWS_REFRESH_DISABLED");
+        return None;
+    }
+    let cfg = match zunel_config::load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::warn!(error = %err, "in-runtime AWS SSO refresh disabled: cannot load config");
+            return None;
+        }
+    };
+    let profiles: Vec<String> = cfg.aws.sso_profiles.clone();
+    if profiles.is_empty() {
+        tracing::debug!("in-runtime AWS SSO refresh inactive: no aws.ssoProfiles configured");
+        return None;
+    }
+    let tick_secs = parse_env_or("ZUNEL_AWS_REFRESH_TICK_SECS", AWS_REFRESH_DEFAULT_TICK_SECS);
+    let window_secs = parse_env_or(
+        "ZUNEL_AWS_REFRESH_WINDOW_SECS",
+        AWS_REFRESH_DEFAULT_WINDOW_SECS as u64,
+    ) as i64;
+    Some(tokio::spawn(aws_refresh_loop(
+        profiles,
+        tick_secs,
+        window_secs,
+    )))
+}
+
+async fn aws_refresh_loop(profiles: Vec<String>, tick_secs: u64, window_secs: i64) {
+    tracing::info!(
+        profiles = ?profiles,
+        tick_secs,
+        window_secs,
+        "starting in-runtime AWS SSO credential refresh"
+    );
+    let ctx = AwsRefreshContext::new();
+    let mut ticker = tokio::time::interval(Duration::from_secs(tick_secs));
+    // First tick fires immediately so a fresh-boot gateway warms its
+    // configured profiles before any agent tool reaches for AWS.
+    loop {
+        ticker.tick().await;
+        for profile in &profiles {
+            match refresh_profile_if_near_expiry(&ctx, profile, Some(window_secs)).await {
+                Ok(AwsRefreshOutcome::Skipped { secs_until_exp, .. }) => {
+                    tracing::debug!(
+                        profile = profile.as_str(),
+                        secs_until_exp,
+                        "AWS SSO creds still fresh; skipping refresh"
+                    );
+                }
+                Ok(AwsRefreshOutcome::Refreshed {
+                    secs_until_exp,
+                    expires_at,
+                    ..
+                }) => {
+                    tracing::info!(
+                        profile = profile.as_str(),
+                        secs_until_exp,
+                        expires_at,
+                        "refreshed AWS SSO role credentials via in-runtime task"
+                    );
+                }
+                Err(err @ AwsRefreshError::SsoSessionExpired { .. }) => {
+                    tracing::warn!(
+                        profile = profile.as_str(),
+                        error = %err,
+                        "AWS SSO session expired; re-run `aws sso login --profile <p>` (loop will self-heal next tick)"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        profile = profile.as_str(),
+                        error = %err,
+                        "AWS SSO refresh tick failed; will retry on next tick"
+                    );
+                }
+            }
         }
     }
 }

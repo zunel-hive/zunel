@@ -80,6 +80,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zunel-aws.workspace = true
 zunel-bus.workspace = true
 zunel-channels.workspace = true
 zunel-config.workspace = true

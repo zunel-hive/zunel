@@ -71,6 +71,7 @@ async fn async_default_registry_loads_stdio_mcp_tools_after_native_tools() {
         gateway: Default::default(),
         tools: ToolsConfig::default(),
         cli: Default::default(),
+        ..Default::default()
     };
     cfg.tools.mcp_servers.insert(
         "fixture".into(),
@@ -168,6 +169,7 @@ async fn async_default_registry_loads_streamable_http_mcp_tools() {
         gateway: Default::default(),
         tools: ToolsConfig::default(),
         cli: Default::default(),
+        ..Default::default()
     };
     cfg.tools.mcp_servers.insert(
         "remote".into(),
@@ -519,5 +521,6 @@ fn empty_cfg() -> Config {
         gateway: Default::default(),
         tools: ToolsConfig::default(),
         cli: Default::default(),
+        ..Default::default()
     }
 }
