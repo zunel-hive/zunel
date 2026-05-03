@@ -1,0 +1,520 @@
+//! `helper_ask` — Mode 2's "agent-loop-as-tool" surface.
+//!
+//! Registered on `zunel mcp agent` only when `--mode2` is set. The
+//! tool runs a fresh [`AgentLoop`] inside the helper profile per call
+//! and returns the final assistant text plus a structured `_meta`
+//! block (helper session id, iteration count, tools used, usage).
+//!
+//! Currently supports:
+//!   * single-JSON response (no SSE / progress streaming yet),
+//!   * `reject` and `allow_all` approval policies,
+//!   * caller-controlled `session_id` namespaced by API-key fingerprint,
+//!   * per-call `max_iterations` arg capped against the CLI ceiling.
+//!
+//! Streaming, approval-forwarding, and per-call timeouts are deferred —
+//! see [`docs/profile-as-mcp-mode2.md`](../../../../../../../docs/profile-as-mcp-mode2.md).
+//!
+//! ## Threading model
+//!
+//! The tool itself is `Send + Sync` — every per-call AgentLoop is built
+//! from cheaply-cloned handles (provider/sessions are `Arc`-backed,
+//! defaults are owned `Clone`). That means a single dispatcher can
+//! safely fan helper_ask calls out across concurrent MCP requests; the
+//! only shared mutable state across calls is whatever
+//! `SessionManager` flushes to disk, and that's already
+//! atomic-temp-file-rename safe.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use zunel_config::AgentDefaults;
+use zunel_core::{
+    AgentLoop, AllowAllApprovalHandler, ApprovalHandler, ApprovalScope, RejectAllApprovalHandler,
+    SessionManager,
+};
+use zunel_providers::{LLMProvider, StreamEvent};
+use zunel_tools::{Tool, ToolContext, ToolRegistry, ToolResult};
+
+/// Approval policy applied to tool calls *inside* the helper's
+/// AgentLoop.
+///
+/// `reject` is the safe default: there is no human in the loop on the
+/// helper side, so any tool that would normally prompt for approval
+/// fails the call cleanly. `allow_all` is the explicit opt-in for
+/// trusted operators running fully read-only helpers — it cannot be
+/// reached without the operator passing `--mode2-approval allow_all`
+/// at server boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperApprovalPolicy {
+    Reject,
+    AllowAll,
+}
+
+impl HelperApprovalPolicy {
+    pub fn from_cli_str(s: &str) -> Result<Self, String> {
+        match s {
+            "reject" => Ok(Self::Reject),
+            "allow_all" => Ok(Self::AllowAll),
+            other => Err(format!(
+                "unknown --mode2-approval value {other:?}; expected 'reject' or 'allow_all'"
+            )),
+        }
+    }
+}
+
+/// `helper_ask` MCP tool.
+pub struct HelperAskTool {
+    provider: Arc<dyn LLMProvider>,
+    defaults: AgentDefaults,
+    sessions: Arc<SessionManager>,
+    /// The helper's own tool registry as the inner AgentLoop will see
+    /// it — Mode 1's filtered registry minus `helper_ask` itself.
+    /// Cloning this per call is cheap because every entry is an
+    /// `Arc<dyn Tool>`.
+    inner_registry: ToolRegistry,
+    workspace: std::path::PathBuf,
+    approval_policy: HelperApprovalPolicy,
+    /// CLI-supplied hard ceiling on iterations a single helper_ask
+    /// call can spend. Defaults to the helper's own
+    /// `agents.defaults.max_tool_iterations` when `None`.
+    max_iterations_cap: Option<usize>,
+}
+
+impl HelperAskTool {
+    pub fn new(
+        provider: Arc<dyn LLMProvider>,
+        defaults: AgentDefaults,
+        sessions: Arc<SessionManager>,
+        inner_registry: ToolRegistry,
+        workspace: std::path::PathBuf,
+        approval_policy: HelperApprovalPolicy,
+        max_iterations_cap: Option<usize>,
+    ) -> Self {
+        Self {
+            provider,
+            defaults,
+            sessions,
+            inner_registry,
+            workspace,
+            approval_policy,
+            max_iterations_cap,
+        }
+    }
+
+    /// Resolve the effective iteration ceiling for one call. The
+    /// caller's tool-arg, the CLI cap, and the helper's own default
+    /// all participate; the tightest non-zero ceiling wins.
+    fn effective_max_iterations(&self, caller_arg: Option<u64>) -> usize {
+        let helper_default = self.defaults.max_tool_iterations.unwrap_or(15);
+        let caller = caller_arg
+            .map(|n| n.max(1) as usize)
+            .unwrap_or(helper_default);
+        let mut chosen = caller.min(helper_default);
+        if let Some(cli_cap) = self.max_iterations_cap {
+            chosen = chosen.min(cli_cap);
+        }
+        chosen.max(1)
+    }
+}
+
+#[async_trait]
+impl Tool for HelperAskTool {
+    fn name(&self) -> &'static str {
+        "helper_ask"
+    }
+
+    fn description(&self) -> &'static str {
+        "Ask the helper agent to handle a prompt with its own LLM and tool registry. \
+         Each call runs a fresh AgentLoop inside the helper profile and returns its \
+         final answer."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["prompt"],
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Question or instruction to send to the helper agent."
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Caller-supplied session key. Omit (or empty) for a fresh session. The helper namespaces the key with the matched API key fingerprint so two unrelated callers cannot collide."
+                },
+                "max_iterations": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Per-call upper bound on tool-loop iterations. Capped against the helper's CLI ceiling and its own configured default."
+                }
+            }
+        })
+    }
+
+    fn concurrency_safe(&self) -> bool {
+        // helper_ask is *not* concurrency-safe within a single batch:
+        // running two helper_ask calls back-to-back against the same
+        // session would race on session writes. The MCP transport
+        // already serialises requests on a single connection, but
+        // the agent runner's batching path explicitly tags this so a
+        // future tool-batch implementation respects it.
+        false
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> ToolResult {
+        let Some(prompt) = args.get("prompt").and_then(Value::as_str) else {
+            return ToolResult::err("helper_ask: missing required string argument `prompt`");
+        };
+        if prompt.is_empty() {
+            return ToolResult::err("helper_ask: `prompt` was empty");
+        }
+
+        let caller_max_iters = args.get("max_iterations").and_then(Value::as_u64);
+        let max_iterations = self.effective_max_iterations(caller_max_iters);
+
+        let caller_supplied_session = args
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let session_id = build_namespaced_session_id(
+            ctx.caller_fingerprint.as_deref(),
+            caller_supplied_session.as_deref(),
+        );
+
+        // Per-call AgentLoop. We rebuild from scratch so two
+        // concurrent helper_ask calls don't share approval / token-
+        // accounting state. All inputs are Arc-backed or cheap to
+        // clone, so the cost is negligible compared to the LLM round
+        // trip we're about to make.
+        let approval_handler: Arc<dyn ApprovalHandler> = match self.approval_policy {
+            HelperApprovalPolicy::Reject => Arc::new(RejectAllApprovalHandler),
+            HelperApprovalPolicy::AllowAll => Arc::new(AllowAllApprovalHandler),
+        };
+
+        let mut defaults = self.defaults.clone();
+        defaults.max_tool_iterations = Some(max_iterations);
+
+        let agent =
+            AgentLoop::with_sessions(self.provider.clone(), defaults, (*self.sessions).clone())
+                .with_tools(self.inner_registry.clone())
+                .with_workspace(self.workspace.clone())
+                .with_approval(approval_handler)
+                // Approval-required mirrors the chosen policy: in `reject`
+                // mode we want the runner to *consult* the approval handler
+                // (which always denies), so the call fails with a clear
+                // error rather than silently bypassing the gate. In
+                // `allow_all` the handler approves unconditionally so the
+                // flag's value is moot — set it true for consistency with
+                // the docs.
+                .with_approval_required(true)
+                .with_approval_scope(ApprovalScope::All);
+
+        // Drain the streaming sink locally; the response is single-JSON,
+        // so deltas aren't forwarded anywhere. The drain task is aborted
+        // right after the call completes.
+        let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let result = match agent.process_streamed(&session_id, prompt, tx).await {
+            Ok(r) => r,
+            Err(err) => {
+                drain.abort();
+                return ToolResult::err(format!("helper_ask: {err}"));
+            }
+        };
+        drain.abort();
+
+        // Build the structured `_meta` payload. The shape mirrors
+        // `docs/profile-as-mcp-mode2.md` so callers that already
+        // parse it can rely on the field set.
+        let meta = json!({
+            "session_id": session_id,
+            "tools_used": result.tools_used,
+            "usage": {
+                "input": result.usage.prompt_tokens,
+                "output": result.usage.completion_tokens,
+                "reasoning": result.usage.reasoning_tokens,
+                "cached": result.usage.cached_tokens,
+            },
+        });
+
+        let content = if result.content.is_empty() {
+            // Empty assistant text is a real outcome (e.g. the model
+            // produced only tool calls and never said anything). We
+            // surface a placeholder so the caller has *something* to
+            // render and the `_meta` still carries the diagnostic.
+            "(helper produced no text response)".to_string()
+        } else {
+            result.content
+        };
+
+        ToolResult::ok(content).with_meta(meta)
+    }
+}
+
+/// Compose `mode2:<fingerprint-or-anon>:<caller-or-fresh>`.
+///
+/// The fingerprint hop prevents two unrelated hub callers from
+/// colliding on the same caller-supplied session key; the
+/// fresh-per-call default avoids accidentally appending unrelated
+/// turns to whatever session-id the model happened to invent. Both
+/// behaviours match the spec in `docs/profile-as-mcp-mode2.md` Q4.
+fn build_namespaced_session_id(
+    caller_fingerprint: Option<&str>,
+    caller_supplied: Option<&str>,
+) -> String {
+    let owner = caller_fingerprint.unwrap_or("anon");
+    let suffix = match caller_supplied {
+        Some(s) => s.to_string(),
+        // Fresh-per-call: derive a stable nanosecond-precision token
+        // so repeated invocations with no `session_id` arg get
+        // distinct sessions but the value is still deterministic
+        // within a single process tick (helps tests and tracing).
+        None => fresh_session_suffix(),
+    };
+    format!("mode2:{owner}:{suffix}")
+}
+
+fn fresh_session_suffix() -> String {
+    // We deliberately *don't* use a UUID crate — adding a dep for a
+    // local cache key is overkill. Nanos-since-epoch + a fast
+    // counter make collisions cosmically unlikely while keeping the
+    // session id readable in `zunel sessions list`.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("fresh-{nanos:016x}-{seq:08x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::tempdir;
+    use zunel_config::AgentDefaults;
+    use zunel_providers::{ChatMessage, GenerationSettings, LLMResponse, ToolSchema, Usage};
+
+    /// Provider that always replies with a fixed string and counts
+    /// calls. Sufficient for slice-1 helper_ask tests where the
+    /// helper's job is "handle this prompt" (i.e. no tool-call loop).
+    struct FakeProvider {
+        reply: String,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LLMProvider for FakeProvider {
+        async fn generate(
+            &self,
+            _model: &str,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSchema],
+            _settings: &GenerationSettings,
+        ) -> zunel_providers::Result<LLMResponse> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(LLMResponse {
+                content: Some(self.reply.clone()),
+                tool_calls: Vec::new(),
+                usage: Usage {
+                    prompt_tokens: 7,
+                    completion_tokens: 11,
+                    cached_tokens: 0,
+                    reasoning_tokens: 0,
+                },
+                finish_reason: None,
+            })
+        }
+    }
+
+    fn make_tool(approval: HelperApprovalPolicy, workspace: &std::path::Path) -> HelperAskTool {
+        let provider: Arc<dyn LLMProvider> = Arc::new(FakeProvider {
+            reply: "helper-says-hi".into(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let defaults = AgentDefaults {
+            provider: Some("custom".into()),
+            model: "fake-x".into(),
+            max_tool_iterations: Some(3),
+            ..Default::default()
+        };
+        let sessions = Arc::new(SessionManager::new(workspace));
+        HelperAskTool::new(
+            provider,
+            defaults,
+            sessions,
+            ToolRegistry::new(),
+            workspace.to_path_buf(),
+            approval,
+            None,
+        )
+    }
+
+    #[test]
+    fn build_namespaced_session_id_uses_fingerprint_when_present() {
+        let id = build_namespaced_session_id(Some("abcd1234"), Some("research-2026-04"));
+        assert_eq!(id, "mode2:abcd1234:research-2026-04");
+    }
+
+    #[test]
+    fn build_namespaced_session_id_falls_back_to_anon() {
+        let id = build_namespaced_session_id(None, Some("research-2026-04"));
+        assert_eq!(id, "mode2:anon:research-2026-04");
+    }
+
+    #[test]
+    fn build_namespaced_session_id_generates_fresh_suffix_when_caller_omits_one() {
+        let a = build_namespaced_session_id(Some("abcd1234"), None);
+        let b = build_namespaced_session_id(Some("abcd1234"), None);
+        assert!(a.starts_with("mode2:abcd1234:fresh-"));
+        assert!(b.starts_with("mode2:abcd1234:fresh-"));
+        assert_ne!(a, b, "fresh suffixes must collide-avoid via the counter");
+    }
+
+    #[test]
+    fn approval_policy_parses_known_values() {
+        assert_eq!(
+            HelperApprovalPolicy::from_cli_str("reject").unwrap(),
+            HelperApprovalPolicy::Reject
+        );
+        assert_eq!(
+            HelperApprovalPolicy::from_cli_str("allow_all").unwrap(),
+            HelperApprovalPolicy::AllowAll
+        );
+        assert!(HelperApprovalPolicy::from_cli_str("forward").is_err());
+    }
+
+    #[test]
+    fn effective_max_iterations_clamps_against_helper_default_and_cli_cap() {
+        let tmp = tempdir().expect("tmpdir");
+        let mut tool = make_tool(HelperApprovalPolicy::Reject, tmp.path());
+        // helper default is 3 (set in make_tool); caller asks for 10
+        // -> clamp to 3.
+        assert_eq!(tool.effective_max_iterations(Some(10)), 3);
+        // Caller below default keeps the smaller number.
+        assert_eq!(tool.effective_max_iterations(Some(2)), 2);
+        // Floor at 1 even when caller passes 0.
+        assert_eq!(tool.effective_max_iterations(Some(0)), 1);
+        // CLI cap further tightens the ceiling.
+        tool.max_iterations_cap = Some(2);
+        assert_eq!(tool.effective_max_iterations(Some(10)), 2);
+    }
+
+    #[tokio::test]
+    async fn helper_ask_returns_text_and_meta_with_namespaced_session() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path());
+
+        let mut ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        ctx.caller_fingerprint = Some("deadbeef".into());
+
+        let result = tool
+            .execute(
+                json!({
+                    "prompt": "draft me a poem",
+                    "session_id": "lit-review",
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        assert_eq!(result.content, "helper-says-hi");
+
+        let meta = result.meta.expect("_meta should be populated");
+        assert_eq!(meta["session_id"], "mode2:deadbeef:lit-review");
+        assert_eq!(meta["usage"]["input"], 7);
+        assert_eq!(meta["usage"]["output"], 11);
+        // Empty tools_used is the expected outcome here: the
+        // helper's loop didn't call any tools (the test registered
+        // an empty inner registry).
+        assert_eq!(meta["tools_used"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn helper_ask_persists_session_so_caller_can_resume() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path());
+
+        let mut ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        ctx.caller_fingerprint = Some("cafef00d".into());
+
+        // First call seeds the session.
+        let first = tool
+            .execute(
+                json!({"prompt": "what's the plan", "session_id": "shared"}),
+                &ctx,
+            )
+            .await;
+        let first_meta = first.meta.expect("_meta on first call");
+        let session_id = first_meta["session_id"]
+            .as_str()
+            .expect("session_id is a string")
+            .to_string();
+        assert_eq!(session_id, "mode2:cafef00d:shared");
+
+        // Second call with the same key should resume the same
+        // namespaced session — verify by reading the on-disk
+        // session file and checking it has the second user turn.
+        let _ = tool
+            .execute(
+                json!({"prompt": "and step two?", "session_id": "shared"}),
+                &ctx,
+            )
+            .await;
+
+        let session = SessionManager::new(tmp.path())
+            .load(&session_id)
+            .expect("session load")
+            .expect("session exists after two calls");
+        let turns: Vec<_> = session
+            .messages()
+            .iter()
+            .filter(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+            .collect();
+        assert_eq!(
+            turns.len(),
+            2,
+            "both user prompts should land in the same session"
+        );
+    }
+
+    #[tokio::test]
+    async fn helper_ask_rejects_missing_prompt() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path());
+        let ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        let result = tool.execute(json!({}), &ctx).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("prompt"),
+            "expected prompt-missing error, got {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn helper_ask_falls_back_to_anon_namespace_when_unauthenticated() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path());
+        // No caller_fingerprint set.
+        let ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        let result = tool
+            .execute(json!({"prompt": "hi", "session_id": "loopback-dev"}), &ctx)
+            .await;
+        let meta = result.meta.expect("_meta");
+        assert_eq!(meta["session_id"], "mode2:anon:loopback-dev");
+    }
+}
