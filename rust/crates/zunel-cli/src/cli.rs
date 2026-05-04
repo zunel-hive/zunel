@@ -223,14 +223,30 @@ pub struct McpAgentArgs {
     /// moment any tool requires approval — there is no human in the
     /// loop on the helper side. `allow_all` auto-approves every
     /// gated call; only sensible for fully read-only helpers run by
-    /// trusted operators.
+    /// trusted operators. `forward` enqueues the request on a
+    /// shared queue and exposes `helper_pending_approvals` /
+    /// `helper_approve` so the hub can resolve it via additional
+    /// MCP calls (polling-based — the spec doesn't define
+    /// bidirectional state transfer).
     #[arg(
         long = "mode2-approval",
         default_value = "reject",
-        value_parser = ["reject", "allow_all"],
+        value_parser = ["reject", "allow_all", "forward"],
         requires = "mode2"
     )]
     pub mode2_approval: String,
+
+    /// Per-approval wallclock ceiling (in seconds) for
+    /// `--mode2-approval forward`. After this duration with no
+    /// matching `helper_approve` decision the queued request flips
+    /// to "deny" so the helper's tool loop unblocks. Defaults to
+    /// 300s. Ignored under any other approval policy.
+    #[arg(
+        long = "mode2-approval-timeout-secs",
+        default_value_t = 300u64,
+        requires = "mode2"
+    )]
+    pub mode2_approval_timeout_secs: u64,
 
     /// Hard upper bound on iterations a single `helper_ask` call
     /// can spend in the helper's tool-call loop. The caller's

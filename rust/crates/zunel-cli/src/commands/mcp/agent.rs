@@ -136,20 +136,44 @@ pub(super) async fn run(args: McpAgentArgs, config_path: Option<&Path>) -> Resul
         let call_timeout = args
             .mode2_call_timeout_secs
             .map(std::time::Duration::from_secs);
-        registry.register(Arc::new(
-            HelperAskTool::new(
-                provider,
-                cfg.agents.defaults.clone(),
-                sessions,
-                inner_registry,
-                workspace.clone(),
-                approval_policy,
-                args.mode2_max_iterations,
-            )
-            .with_system_prompt_disabled(args.mode2_disable_system_prompt)
-            .with_cancel_registry(Arc::clone(&registry_arc))
-            .with_call_timeout(call_timeout),
+
+        // Approval-forwarding wiring. Build the queue and the
+        // poll/resolve tools only when the operator opted in via
+        // `--mode2-approval forward`; under reject/allow_all they
+        // stay absent from the registry so the helper's surface
+        // doesn't grow.
+        let approval_queue = if matches!(approval_policy, HelperApprovalPolicy::Forward) {
+            let queue = super::approval_queue::ApprovalQueue::new();
+            registry.register(Arc::new(
+                super::helper_approval_tools::HelperPendingApprovalsTool::new(Arc::clone(&queue)),
+            ));
+            registry.register(Arc::new(
+                super::helper_approval_tools::HelperApproveTool::new(Arc::clone(&queue)),
+            ));
+            Some(queue)
+        } else {
+            None
+        };
+
+        let mut helper_ask = HelperAskTool::new(
+            provider,
+            cfg.agents.defaults.clone(),
+            sessions,
+            inner_registry,
+            workspace.clone(),
+            approval_policy,
+            args.mode2_max_iterations,
+        )
+        .with_system_prompt_disabled(args.mode2_disable_system_prompt)
+        .with_cancel_registry(Arc::clone(&registry_arc))
+        .with_call_timeout(call_timeout)
+        .with_approval_timeout(std::time::Duration::from_secs(
+            args.mode2_approval_timeout_secs,
         ));
+        if let Some(queue) = approval_queue {
+            helper_ask = helper_ask.with_approval_queue(queue);
+        }
+        registry.register(Arc::new(helper_ask));
         cancel_registry = Some(registry_arc);
     }
     let identity = DispatcherIdentity {

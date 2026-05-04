@@ -38,6 +38,7 @@ use zunel_core::{
 use zunel_providers::{LLMProvider, StreamEvent};
 use zunel_tools::{Tool, ToolContext, ToolRegistry, ToolResult};
 
+use super::approval_queue::{ApprovalQueue, QueueApprovalHandler};
 use super::cancel_registry::CancelRegistry;
 
 /// Approval policy applied to tool calls *inside* the helper's
@@ -48,11 +49,14 @@ use super::cancel_registry::CancelRegistry;
 /// fails the call cleanly. `allow_all` is the explicit opt-in for
 /// trusted operators running fully read-only helpers — it cannot be
 /// reached without the operator passing `--mode2-approval allow_all`
-/// at server boot.
+/// at server boot. `forward` enqueues each request onto the shared
+/// [`ApprovalQueue`] so the hub can poll via
+/// `helper_pending_approvals` and resolve via `helper_approve`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelperApprovalPolicy {
     Reject,
     AllowAll,
+    Forward,
 }
 
 impl HelperApprovalPolicy {
@@ -60,8 +64,9 @@ impl HelperApprovalPolicy {
         match s {
             "reject" => Ok(Self::Reject),
             "allow_all" => Ok(Self::AllowAll),
+            "forward" => Ok(Self::Forward),
             other => Err(format!(
-                "unknown --mode2-approval value {other:?}; expected 'reject' or 'allow_all'"
+                "unknown --mode2-approval value {other:?}; expected 'reject', 'allow_all', or 'forward'"
             )),
         }
     }
@@ -98,6 +103,19 @@ pub struct HelperAskTool {
     /// hub can distinguish "I cancelled" from "the helper timed out
     /// on its own". `None` means "no per-call timeout".
     call_timeout: Option<Duration>,
+    /// Shared approval queue used when `approval_policy ==
+    /// HelperApprovalPolicy::Forward`. The CLI wires up the same
+    /// `Arc<ApprovalQueue>` across this tool, the
+    /// [`QueueApprovalHandler`] inside the helper's AgentLoop, and
+    /// the two new `helper_pending_approvals` /
+    /// `helper_approve` tools so a single decision flows end-to-end.
+    /// `None` keeps the legacy reject/allow_all behaviour.
+    approval_queue: Option<Arc<ApprovalQueue>>,
+    /// Per-approval wallclock ceiling. After this duration with no
+    /// matching `helper_approve` decision the queued request flips
+    /// to "deny" so the helper's tool loop unblocks. Ignored unless
+    /// `approval_policy == Forward`.
+    approval_timeout: Duration,
 }
 
 /// Maximum length (UTF-8 bytes) of a caller-supplied `system_prompt`.
@@ -129,6 +147,8 @@ impl HelperAskTool {
             system_prompt_disabled: false,
             cancel_registry: None,
             call_timeout: None,
+            approval_queue: None,
+            approval_timeout: Duration::from_secs(300),
         }
     }
 
@@ -155,6 +175,24 @@ impl HelperAskTool {
     /// "no timeout" behaviour.
     pub fn with_call_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.call_timeout = timeout;
+        self
+    }
+
+    /// Wire an [`ApprovalQueue`] for `--mode2-approval forward`.
+    /// When the policy is `Forward`, every approval request from
+    /// the helper's AgentLoop lands on this queue; the hub polls via
+    /// `helper_pending_approvals` and resolves via `helper_approve`.
+    /// When the policy is `Reject` or `AllowAll`, the queue is
+    /// unused — the static handlers short-circuit before reaching
+    /// it.
+    pub fn with_approval_queue(mut self, queue: Arc<ApprovalQueue>) -> Self {
+        self.approval_queue = Some(queue);
+        self
+    }
+
+    /// Per-approval wallclock ceiling. Default is 5 minutes.
+    pub fn with_approval_timeout(mut self, timeout: Duration) -> Self {
+        self.approval_timeout = timeout;
         self
     }
 
@@ -287,6 +325,22 @@ impl Tool for HelperAskTool {
         let approval_handler: Arc<dyn ApprovalHandler> = match self.approval_policy {
             HelperApprovalPolicy::Reject => Arc::new(RejectAllApprovalHandler),
             HelperApprovalPolicy::AllowAll => Arc::new(AllowAllApprovalHandler),
+            HelperApprovalPolicy::Forward => match self.approval_queue.as_ref() {
+                Some(queue) => Arc::new(QueueApprovalHandler::new(
+                    Arc::clone(queue),
+                    self.approval_timeout,
+                )),
+                None => {
+                    // Misconfiguration: forward policy without a
+                    // queue. Fail closed (deny) rather than crash
+                    // the helper, and surface it through _meta so
+                    // the operator notices.
+                    return ToolResult::err(
+                        "helper_ask: approval policy 'forward' requires an ApprovalQueue \
+                         (server misconfigured)",
+                    );
+                }
+            },
         };
 
         let mut defaults = self.defaults.clone();
@@ -609,7 +663,11 @@ mod tests {
             HelperApprovalPolicy::from_cli_str("allow_all").unwrap(),
             HelperApprovalPolicy::AllowAll
         );
-        assert!(HelperApprovalPolicy::from_cli_str("forward").is_err());
+        assert_eq!(
+            HelperApprovalPolicy::from_cli_str("forward").unwrap(),
+            HelperApprovalPolicy::Forward
+        );
+        assert!(HelperApprovalPolicy::from_cli_str("nonsense").is_err());
     }
 
     #[test]
@@ -985,6 +1043,21 @@ mod tests {
             arguments_fragment: None,
         })
         .is_none());
+    }
+
+    #[tokio::test]
+    async fn helper_ask_with_forward_policy_misconfigured_without_queue_returns_error() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Forward, tmp.path());
+        let ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        let result = tool.execute(json!({"prompt": "hi"}), &ctx).await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("ApprovalQueue"),
+            "expected misconfiguration error: {}",
+            result.content
+        );
     }
 
     #[tokio::test]
