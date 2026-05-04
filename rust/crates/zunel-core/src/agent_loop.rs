@@ -77,6 +77,13 @@ pub struct AgentLoop {
     /// the session — so updates on disk (or upgrades that swap an
     /// embedded builtin) take effect on the next turn.
     skills: Option<Arc<SkillsLoader>>,
+    /// Per-loop operator persona prepended ahead of the skills system
+    /// message every turn. Mode 2's `helper_ask` uses this to honour
+    /// the caller's `system_prompt` arg without polluting the
+    /// helper's persisted session log: like the skills system
+    /// message, the value is reapplied on every turn from the live
+    /// builder, never written to disk.
+    extra_system_message: Option<String>,
     /// When `true`, [`process_inbound_once`] appends a one-line token
     /// footer to the outbound message before publishing it on the bus.
     /// Wired from `channels.showTokenFooter` so it follows the same
@@ -120,6 +127,7 @@ impl AgentLoop {
             approval_scope: ApprovalScope::default(),
             workspace: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
             skills: None,
+            extra_system_message: None,
             show_token_footer: false,
         }
     }
@@ -140,6 +148,7 @@ impl AgentLoop {
             approval_scope: ApprovalScope::default(),
             workspace: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
             skills: None,
+            extra_system_message: None,
             show_token_footer: false,
         }
     }
@@ -189,6 +198,20 @@ impl AgentLoop {
     /// with no system message (existing pre-v0.2.8 behavior).
     pub fn with_skills(mut self, skills: SkillsLoader) -> Self {
         self.skills = Some(Arc::new(skills));
+        self
+    }
+
+    /// Inject a per-call operator persona that gets prepended ahead of
+    /// the skills system message every turn. Mode 2's `helper_ask`
+    /// uses this to honour the caller's `system_prompt` arg without
+    /// polluting the helper's persisted session log: like
+    /// [`build_skills_system_message`], the value is reapplied on
+    /// every turn from the live builder, never written to disk.
+    ///
+    /// `Some("")` is normalised to `None` so callers can blindly
+    /// forward whatever string came off the wire.
+    pub fn with_extra_system_message(mut self, msg: Option<String>) -> Self {
+        self.extra_system_message = msg.filter(|s| !s.is_empty());
         self
     }
 
@@ -394,11 +417,20 @@ impl AgentLoop {
         session.add_message(ChatRole::User, message);
         let history = session.get_history(self.history_window());
         let mut initial_messages = history_to_chat_messages(&history);
-        // Prepend a fresh skills system message every turn. Not
-        // persisted into the session — re-rendered from disk on the
-        // next turn so the model always sees current skills bodies.
-        if let Some(system_msg) = self.build_skills_system_message() {
-            initial_messages.insert(0, system_msg);
+        // Stack the per-turn system messages: operator persona first
+        // (Mode 2's `system_prompt` arg), skills summary second,
+        // history third. Both are re-rendered from the live builder
+        // every turn, so the persisted session log never accumulates
+        // ephemeral system messages.
+        let mut prepended: Vec<ChatMessage> = Vec::new();
+        if let Some(extra) = self.extra_system_message.as_deref() {
+            prepended.push(ChatMessage::system(extra));
+        }
+        if let Some(skills) = self.build_skills_system_message() {
+            prepended.push(skills);
+        }
+        for (i, msg) in prepended.into_iter().enumerate() {
+            initial_messages.insert(i, msg);
         }
         let starting_len = initial_messages.len();
 
