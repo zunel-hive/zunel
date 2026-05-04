@@ -15,7 +15,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use zunel_mcp_self::{DispatchMeta, McpDispatcher};
-use zunel_tools::{ToolContext, ToolRegistry};
+use zunel_tools::{RpcId, ToolContext, ToolRegistry};
+
+use super::cancel_registry::CancelRegistry;
 
 /// Server identity advertised on `initialize`. Includes the profile
 /// name so multi-server hosts can disambiguate when more than one
@@ -38,6 +40,12 @@ pub struct RegistryDispatcher {
     /// `tools/list` requests don't re-walk the registry; the registry
     /// is immutable for the lifetime of the dispatcher.
     tools_descriptor: Value,
+    /// Shared registry of in-flight rpc-id → cancel-token entries.
+    /// `None` disables `notifications/cancelled` routing — the
+    /// dispatcher silently drops the notification, which matches the
+    /// spec ("notifications carry no reply"). The CLI wires a real
+    /// registry whenever Mode 2 is enabled.
+    cancel_registry: Option<Arc<CancelRegistry>>,
 }
 
 impl RegistryDispatcher {
@@ -48,7 +56,17 @@ impl RegistryDispatcher {
             registry: Arc::new(registry),
             context: Arc::new(context),
             tools_descriptor,
+            cancel_registry: None,
         }
+    }
+
+    /// Wire `notifications/cancelled` to a shared cancel registry.
+    /// Mode 2's `helper_ask` registers cancel tokens under the
+    /// inbound rpc id; routing here closes the loop so a hub
+    /// notification fires the matching token.
+    pub fn with_cancel_registry(mut self, registry: Arc<CancelRegistry>) -> Self {
+        self.cancel_registry = Some(registry);
+        self
     }
 
     /// Number of tools currently exposed. Used by the boot banner so
@@ -128,6 +146,25 @@ impl RegistryDispatcher {
 impl McpDispatcher for RegistryDispatcher {
     async fn dispatch(&self, message: &Value, meta: &DispatchMeta) -> Option<Value> {
         let method = message.get("method").and_then(Value::as_str)?;
+        // Slice 2: hub-issued cancellation. Spec wire format:
+        //   { "jsonrpc": "2.0", "method": "notifications/cancelled",
+        //     "params": { "requestId": <id>, "reason": "..." } }
+        // We find the matching in-flight call's CancellationToken
+        // and fire it. Notifications are reply-less by spec, so we
+        // still return None either way.
+        if method == "notifications/cancelled" {
+            if let Some(registry) = &self.cancel_registry {
+                let request_id = message
+                    .get("params")
+                    .and_then(|p| p.get("requestId"))
+                    .and_then(RpcId::from_json);
+                if let Some(id) = request_id {
+                    let fired = registry.cancel(&id);
+                    tracing::debug!(?id, fired, "notifications/cancelled routed");
+                }
+            }
+            return None;
+        }
         if method.starts_with("notifications/") {
             return None;
         }
@@ -524,6 +561,57 @@ mod tests {
             .clone()
             .expect("rpc_id captured");
         assert_eq!(observed, Some(zunel_tools::RpcId::String("req-42".into())));
+    }
+
+    #[tokio::test]
+    async fn notifications_cancelled_fires_registered_token() {
+        use crate::commands::mcp::cancel_registry::CancelRegistry;
+        let registry = CancelRegistry::new();
+        // Pre-register an entry so we can observe the token firing.
+        let guard = registry.register(zunel_tools::RpcId::String("req-cancel-test".into()));
+        let token = guard.token();
+
+        let dispatcher = dispatcher_for(registry_with_one_tool())
+            .with_cancel_registry(Arc::clone(&registry));
+
+        let response = dispatcher
+            .dispatch(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": "req-cancel-test", "reason": "user pressed esc"}
+                }),
+                &DispatchMeta::default(),
+            )
+            .await;
+
+        assert!(response.is_none(), "notifications produce no reply");
+        assert!(token.is_cancelled(), "registered token should fire");
+        // Guard is still alive — drop it explicitly so we don't leak
+        // the entry between tests (other tests build fresh registries
+        // anyway, but discipline matters).
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn notifications_cancelled_with_unknown_id_is_a_safe_noop() {
+        use crate::commands::mcp::cancel_registry::CancelRegistry;
+        let registry = CancelRegistry::new();
+        let dispatcher = dispatcher_for(registry_with_one_tool())
+            .with_cancel_registry(Arc::clone(&registry));
+
+        let response = dispatcher
+            .dispatch(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": 9999}
+                }),
+                &DispatchMeta::default(),
+            )
+            .await;
+
+        assert!(response.is_none());
     }
 
     #[tokio::test]

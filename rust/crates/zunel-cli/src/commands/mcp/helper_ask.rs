@@ -25,6 +25,7 @@
 //! atomic-temp-file-rename safe.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -36,6 +37,8 @@ use zunel_core::{
 };
 use zunel_providers::{LLMProvider, StreamEvent};
 use zunel_tools::{Tool, ToolContext, ToolRegistry, ToolResult};
+
+use super::cancel_registry::CancelRegistry;
 
 /// Approval policy applied to tool calls *inside* the helper's
 /// AgentLoop.
@@ -85,6 +88,16 @@ pub struct HelperAskTool {
     /// diagnostic so the hub can see why its prompt didn't take.
     /// Wired from `--mode2-disable-system-prompt`.
     system_prompt_disabled: bool,
+    /// Shared registry of in-flight rpc-id → cancel-token entries.
+    /// `None` skips cancellation entirely (useful for in-process
+    /// tests; the dispatcher always wires this up at runtime).
+    cancel_registry: Option<Arc<CancelRegistry>>,
+    /// Per-call wallclock ceiling. When `Some`, the helper's
+    /// AgentLoop is wrapped in `tokio::time::timeout`; on expiry we
+    /// fire the cancel token and return a structured error so the
+    /// hub can distinguish "I cancelled" from "the helper timed out
+    /// on its own". `None` means "no per-call timeout".
+    call_timeout: Option<Duration>,
 }
 
 /// Maximum length (UTF-8 bytes) of a caller-supplied `system_prompt`.
@@ -114,6 +127,8 @@ impl HelperAskTool {
             approval_policy,
             max_iterations_cap,
             system_prompt_disabled: false,
+            cancel_registry: None,
+            call_timeout: None,
         }
     }
 
@@ -123,6 +138,23 @@ impl HelperAskTool {
     /// in.
     pub fn with_system_prompt_disabled(mut self, disabled: bool) -> Self {
         self.system_prompt_disabled = disabled;
+        self
+    }
+
+    /// Wire the tool to a shared [`CancelRegistry`] so a
+    /// `notifications/cancelled` from the hub can interrupt the
+    /// helper mid-call. Without this opt-in the tool runs without
+    /// cancellation support (still safe — no token is ever fired).
+    pub fn with_cancel_registry(mut self, registry: Arc<CancelRegistry>) -> Self {
+        self.cancel_registry = Some(registry);
+        self
+    }
+
+    /// Wallclock ceiling for a single helper_ask call. Wired from
+    /// `--mode2-call-timeout-secs`. `None` keeps the legacy
+    /// "no timeout" behaviour.
+    pub fn with_call_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.call_timeout = timeout;
         self
     }
 
@@ -260,6 +292,21 @@ impl Tool for HelperAskTool {
         let mut defaults = self.defaults.clone();
         defaults.max_tool_iterations = Some(max_iterations);
 
+        // Register a cancel guard under the inbound rpc id when both
+        // the registry and the id are available; otherwise run with
+        // a fresh never-cancelled token. Holding the guard across
+        // the call ensures a panic / early return removes the
+        // registry entry automatically (RAII).
+        let cancel_guard =
+            match (self.cancel_registry.as_ref(), ctx.rpc_id.as_ref()) {
+                (Some(reg), Some(id)) => Some(reg.register(id.clone())),
+                _ => None,
+            };
+        let cancel_token = cancel_guard
+            .as_ref()
+            .map(|g| g.token())
+            .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+
         let agent =
             AgentLoop::with_sessions(self.provider.clone(), defaults, (*self.sessions).clone())
                 .with_tools(self.inner_registry.clone())
@@ -274,7 +321,8 @@ impl Tool for HelperAskTool {
                 // the docs.
                 .with_approval_required(true)
                 .with_approval_scope(ApprovalScope::All)
-                .with_extra_system_message(effective_system_prompt);
+                .with_extra_system_message(effective_system_prompt)
+                .with_cancel(cancel_token.clone());
 
         // Drain the streaming sink locally; the response is single-JSON,
         // so deltas aren't forwarded anywhere. The drain task is aborted
@@ -282,14 +330,50 @@ impl Tool for HelperAskTool {
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
 
-        let result = match agent.process_streamed(&session_id, prompt, tx).await {
+        // Wrap the helper turn in an optional timeout. The outer
+        // race between the timeout and the agent run lets us
+        // distinguish "operator-set ceiling exceeded" from
+        // "hub-issued cancel" in the result we surface back.
+        let agent_fut = agent.process_streamed(&session_id, prompt, tx);
+        let result = match self.call_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, agent_fut).await {
+                Ok(Ok(r)) => Ok(r),
+                Ok(Err(err)) => Err(err),
+                Err(_) => {
+                    // Timeout: trigger the cancel so any
+                    // still-running tool call notices, then
+                    // surface a structured error.
+                    cancel_token.cancel();
+                    drain.abort();
+                    drop(cancel_guard);
+                    return ToolResult::err(format!(
+                        "helper_ask: per-call timeout exceeded ({}s)",
+                        timeout.as_secs()
+                    ));
+                }
+            },
+            None => agent_fut.await,
+        };
+
+        let result = match result {
             Ok(r) => r,
             Err(err) => {
                 drain.abort();
-                return ToolResult::err(format!("helper_ask: {err}"));
+                drop(cancel_guard);
+                // Cancellation surfaces as a typed AgentLoop error so
+                // we can echo the application-defined code-32800
+                // contract through the dispatcher. Other errors stay
+                // generic.
+                let msg = if matches!(err, zunel_core::Error::Cancelled) {
+                    "helper_ask: cancelled by hub".to_string()
+                } else {
+                    format!("helper_ask: {err}")
+                };
+                return ToolResult::err(msg);
             }
         };
         drain.abort();
+        drop(cancel_guard);
 
         // Build the structured `_meta` payload. The shape mirrors
         // `docs/profile-as-mcp-mode2.md` so callers that already
@@ -655,5 +739,121 @@ mod tests {
             "error mentions field name: {}",
             result.content
         );
+    }
+
+    /// Provider that sleeps inside `generate_stream` so the test can
+    /// reliably win the cancel race. Used by the cancellation tests.
+    struct SlowStreamProvider;
+
+    #[async_trait]
+    impl LLMProvider for SlowStreamProvider {
+        async fn generate(
+            &self,
+            _model: &str,
+            _messages: &[ChatMessage],
+            _tools: &[ToolSchema],
+            _settings: &GenerationSettings,
+        ) -> zunel_providers::Result<LLMResponse> {
+            unreachable!("streaming path only")
+        }
+
+        fn generate_stream<'a>(
+            &'a self,
+            _model: &'a str,
+            _messages: &'a [ChatMessage],
+            _tools: &'a [ToolSchema],
+            _settings: &'a GenerationSettings,
+        ) -> futures::stream::BoxStream<'a, zunel_providers::Result<zunel_providers::StreamEvent>>
+        {
+            Box::pin(async_stream::stream! {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                yield Ok(zunel_providers::StreamEvent::Done(LLMResponse {
+                    content: Some("never seen".into()),
+                    tool_calls: Vec::new(),
+                    usage: Usage::default(),
+                    finish_reason: None,
+                }));
+            })
+        }
+    }
+
+    fn make_tool_with_slow_provider(
+        approval: HelperApprovalPolicy,
+        workspace: &std::path::Path,
+    ) -> HelperAskTool {
+        let provider: Arc<dyn LLMProvider> = Arc::new(SlowStreamProvider);
+        let defaults = AgentDefaults {
+            provider: Some("custom".into()),
+            model: "fake-x".into(),
+            max_tool_iterations: Some(3),
+            ..Default::default()
+        };
+        let sessions = Arc::new(SessionManager::new(workspace));
+        HelperAskTool::new(
+            provider,
+            defaults,
+            sessions,
+            ToolRegistry::new(),
+            workspace.to_path_buf(),
+            approval,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn helper_ask_returns_cancelled_error_when_registry_fires() {
+        let tmp = tempdir().expect("tmpdir");
+        let registry = CancelRegistry::new();
+        let tool = make_tool_with_slow_provider(HelperApprovalPolicy::Reject, tmp.path())
+            .with_cancel_registry(Arc::clone(&registry));
+        let mut ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        ctx.rpc_id = Some(zunel_tools::RpcId::String("req-cancel-1".into()));
+
+        // Trigger a cancel shortly after dispatch, while the provider
+        // is still inside its 5s sleep.
+        let registry_clone = Arc::clone(&registry);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            assert!(registry_clone.cancel(&zunel_tools::RpcId::String("req-cancel-1".into())));
+        });
+
+        let result = tool
+            .execute(json!({"prompt": "long task"}), &ctx)
+            .await;
+        assert!(result.is_error, "expected cancel error: {}", result.content);
+        assert!(
+            result.content.contains("cancelled"),
+            "expected cancelled message: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn helper_ask_call_timeout_triggers_structured_error() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool_with_slow_provider(HelperApprovalPolicy::Reject, tmp.path())
+            .with_call_timeout(Some(std::time::Duration::from_millis(50)));
+        let ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+
+        let result = tool.execute(json!({"prompt": "long task"}), &ctx).await;
+        assert!(result.is_error, "expected timeout error: {}", result.content);
+        assert!(
+            result.content.contains("timeout"),
+            "expected timeout message: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn helper_ask_runs_without_registry_when_no_rpc_id() {
+        // No registry / no rpc_id: the tool must still answer normally.
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path());
+        let ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        let result = tool.execute(json!({"prompt": "hi"}), &ctx).await;
+        assert!(!result.is_error);
     }
 }

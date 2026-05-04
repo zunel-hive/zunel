@@ -248,6 +248,14 @@ pub struct McpAgentArgs {
     #[arg(long = "mode2-disable-system-prompt", requires = "mode2")]
     pub mode2_disable_system_prompt: bool,
 
+    /// Wallclock ceiling (in seconds) for a single `helper_ask`
+    /// call. On expiry the helper's loop is cancelled and the
+    /// caller sees a structured error. Defaults to no timeout —
+    /// the call runs until the helper finishes, the hub cancels,
+    /// or the underlying provider errors out.
+    #[arg(long = "mode2-call-timeout-secs", requires = "mode2")]
+    pub mode2_call_timeout_secs: Option<u64>,
+
     /// Print a paste-ready `tools.mcpServers.<name>` snippet for this
     /// profile to stdout and exit without binding the socket. The
     /// snippet uses an `${ENV}` reference for the bearer token rather
