@@ -669,6 +669,37 @@ where
         rpc_id: parsed.get("id").and_then(zunel_tools::RpcId::from_json),
     };
 
+    // Slice 2 streaming gate: when the caller passed
+    // `params._meta.progressToken` AND accepts `text/event-stream`, we
+    // fan out via the streaming dispatcher path so the tool can emit
+    // mid-call `notifications/progress` events. Batches are excluded
+    // — there's no clean way to interleave per-item progress on a
+    // single SSE response, and the spec doesn't define batched
+    // streaming.
+    let streaming_request = !parsed.is_array()
+        && accepts_event_stream(&request.accept)
+        && parsed
+            .get("params")
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.get("progressToken"))
+            .is_some();
+
+    if streaming_request {
+        stamp(&mut log_ctx, 200);
+        // Streaming path runs the dispatcher and the SSE writer
+        // side-by-side: the writer drains a progress channel until
+        // the dispatch future resolves, then emits the final
+        // response as the last event and closes.
+        return write_streaming_response(
+            stream,
+            session_id,
+            dispatcher.clone(),
+            parsed,
+            meta,
+        )
+        .await;
+    }
+
     let responses = match &parsed {
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
@@ -869,6 +900,102 @@ where
         stream.write_all(bytes).await?;
     }
     stream.write_all(b"\r\n").await?;
+    Ok(())
+}
+
+/// Slice 2 streaming response. Drives the dispatcher's
+/// [`McpDispatcher::dispatch_streaming`] path, fans out each progress
+/// notification through the open SSE connection, then writes the final
+/// JSON-RPC response as the last `data:` event before closing the
+/// chunked stream.
+///
+/// We hold off opening the SSE response headers until the first event
+/// is ready to write — that way the chunked envelope only opens once
+/// we know we'll send something. (The dispatcher could in principle
+/// resolve immediately if it has nothing streaming-worthy to say, in
+/// which case the client just sees a single SSE event with the final
+/// response.)
+async fn write_streaming_response<S>(
+    stream: &mut S,
+    session_id: &str,
+    dispatcher: Arc<dyn McpDispatcher>,
+    parsed: Value,
+    meta: DispatchMeta,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let header = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream\r\n\
+         Cache-Control: no-cache, no-transform\r\n\
+         Mcp-Session-Id: {}\r\n\
+         Transfer-Encoding: chunked\r\n\
+         Connection: close\r\n\r\n",
+        session_id
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.flush().await?;
+
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<Value>(64);
+    // Spawn the dispatcher in its own task so we can interleave
+    // progress events and the eventual final response on the SSE
+    // wire. The task takes its own owned dispatcher Arc + parsed
+    // message so the parent future can keep `&mut stream` for
+    // writing.
+    let dispatcher_task = tokio::spawn({
+        let dispatcher = Arc::clone(&dispatcher);
+        async move {
+            dispatcher
+                .dispatch_streaming(&parsed, &meta, progress_tx)
+                .await
+        }
+    });
+
+    // Drain progress events as they arrive. The channel closes when
+    // the dispatcher task drops its sink (either intentionally on
+    // completion, or because the task panicked / was aborted).
+    while let Some(event) = progress_rx.recv().await {
+        let event_body = format!(
+            "event: message\ndata: {}\n\n",
+            serde_json::to_string(&event)?
+        );
+        write_chunk(stream, event_body.as_bytes()).await?;
+        stream.flush().await?;
+    }
+
+    // Wait for the final response from the dispatcher.
+    let final_response = match dispatcher_task.await {
+        Ok(resp) => resp,
+        Err(join_err) => {
+            // Tokio JoinError: the dispatcher task panicked. Surface
+            // a generic JSON-RPC error so the client doesn't hang
+            // waiting for a final event. We avoid pulling in
+            // `tracing` here — the transport crate is intentionally
+            // dep-light — and rely on the caller's stderr capture to
+            // see the panic.
+            eprintln!("zunel-mcp-self: streaming dispatcher panicked: {join_err:?}");
+            Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {
+                    "code": -32603,
+                    "message": "internal error: dispatcher panicked"
+                }
+            }))
+        }
+    };
+
+    if let Some(payload) = final_response {
+        let event_body = format!(
+            "event: message\ndata: {}\n\n",
+            serde_json::to_string(&payload)?
+        );
+        write_chunk(stream, event_body.as_bytes()).await?;
+    }
+    write_chunk(stream, b"").await?;
+    stream.flush().await?;
+    let _ = stream.shutdown().await;
     Ok(())
 }
 

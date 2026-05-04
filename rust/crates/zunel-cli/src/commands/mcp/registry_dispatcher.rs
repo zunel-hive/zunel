@@ -92,6 +92,22 @@ impl RegistryDispatcher {
     }
 
     async fn call_tool(&self, msg: &Value, meta: &DispatchMeta) -> Value {
+        self.call_tool_with_progress(msg, meta, None).await
+    }
+
+    /// Streaming-aware tool dispatch. Identical to [`call_tool`]
+    /// except that when `progress_sink` is `Some` and the inbound
+    /// request carries `params._meta.progressToken`, we stamp the
+    /// sink onto [`ToolContext::progress_sink`] so a tool (notably
+    /// Mode 2's `helper_ask`) can push mid-call
+    /// `notifications/progress` envelopes onto the open SSE
+    /// response.
+    async fn call_tool_with_progress(
+        &self,
+        msg: &Value,
+        meta: &DispatchMeta,
+        progress_sink: Option<tokio::sync::mpsc::Sender<Value>>,
+    ) -> Value {
         let name = msg
             .get("params")
             .and_then(|p| p.get("name"))
@@ -102,6 +118,11 @@ impl RegistryDispatcher {
             .and_then(|p| p.get("arguments"))
             .cloned()
             .unwrap_or_else(|| json!({}));
+        let progress_token = msg
+            .get("params")
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.get("progressToken"))
+            .cloned();
         // Clone the base context so this request gets its own
         // `incoming_call_depth` stamp without mutating shared state.
         // The clone is cheap: every field is either plain-old-data or
@@ -118,6 +139,36 @@ impl RegistryDispatcher {
         // a cancellation token under the inbound JSON-RPC id so a
         // later `notifications/cancelled` can interrupt the call.
         ctx.rpc_id = meta.rpc_id.clone();
+        // Slice 2 streaming: stamp the progress sink onto the ctx so
+        // the tool (helper_ask) can push notifications/progress
+        // envelopes mid-call. We bridge the raw progressToken
+        // through a wrapper sender that prepends the JSON-RPC
+        // notification envelope so tools don't need to know about
+        // the wire format.
+        if let (Some(sink), Some(token)) = (progress_sink, progress_token) {
+            let (tool_tx, mut tool_rx) = tokio::sync::mpsc::channel::<Value>(64);
+            ctx.progress_sink = Some(tool_tx);
+            // Spawn a translator that wraps each raw progress payload
+            // in a `notifications/progress` envelope and forwards it
+            // to the transport sink. The task ends when the tool
+            // drops its sender (call completes) or when the
+            // transport sink is dropped.
+            tokio::spawn(async move {
+                while let Some(payload) = tool_rx.recv().await {
+                    let envelope = json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/progress",
+                        "params": {
+                            "progressToken": token,
+                            "data": payload,
+                        }
+                    });
+                    if sink.send(envelope).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
         // ToolRegistry::execute always returns Ok (errors are folded
         // into ToolResult::is_error) so the unwrap is total here. Use
         // `expect` defensively to surface any future Infallible
@@ -175,6 +226,31 @@ impl McpDispatcher for RegistryDispatcher {
             "tools/call" => self.call_tool(message, meta).await,
             _ => json!({}),
         };
+        Some(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        }))
+    }
+
+    async fn dispatch_streaming(
+        &self,
+        message: &Value,
+        meta: &DispatchMeta,
+        progress_sink: tokio::sync::mpsc::Sender<Value>,
+    ) -> Option<Value> {
+        let method = message.get("method").and_then(Value::as_str)?;
+        // Streaming is only meaningful for tools/call — for every
+        // other method the caller is asking for a static reply that
+        // doesn't have intermediate state to forward, so we delegate
+        // to the non-streaming path.
+        if method != "tools/call" {
+            return self.dispatch(message, meta).await;
+        }
+        let id = message.get("id").cloned().unwrap_or(Value::Null);
+        let result = self
+            .call_tool_with_progress(message, meta, Some(progress_sink))
+            .await;
         Some(json!({
             "jsonrpc": "2.0",
             "id": id,

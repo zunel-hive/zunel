@@ -324,11 +324,34 @@ impl Tool for HelperAskTool {
                 .with_extra_system_message(effective_system_prompt)
                 .with_cancel(cancel_token.clone());
 
-        // Drain the streaming sink locally; the response is single-JSON,
-        // so deltas aren't forwarded anywhere. The drain task is aborted
-        // right after the call completes.
+        // The streaming sink: when the dispatcher gave us a progress
+        // sink (the hub passed `_meta.progressToken` and accepts
+        // text/event-stream), we translate every StreamEvent into a
+        // structured progress payload and forward it. Otherwise we
+        // just drain the sink locally so the agent loop's senders
+        // don't block.
         let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
-        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let progress_sink = ctx.progress_sink.clone();
+        let drain = tokio::spawn(async move {
+            // We forward the full event stream as small JSON payloads
+            // through the dispatcher-provided progress sink; the
+            // dispatcher wraps each in an MCP `notifications/progress`
+            // envelope before pushing it onto the SSE wire. With no
+            // sink we still drain so the agent loop doesn't block.
+            while let Some(event) = rx.recv().await {
+                if let Some(sink) = progress_sink.as_ref() {
+                    if let Some(payload) = stream_event_to_progress_payload(&event) {
+                        if sink.send(payload).await.is_err() {
+                            // Client disconnected — keep draining
+                            // so the agent loop doesn't block, but
+                            // stop forwarding.
+                            while rx.recv().await.is_some() {}
+                            return;
+                        }
+                    }
+                }
+            }
+        });
 
         // Wrap the helper turn in an optional timeout. The outer
         // race between the timeout and the agent run lets us
@@ -342,9 +365,12 @@ impl Tool for HelperAskTool {
                 Err(_) => {
                     // Timeout: trigger the cancel so any
                     // still-running tool call notices, then
-                    // surface a structured error.
+                    // surface a structured error. We let the drain
+                    // task finish forwarding any events it already
+                    // pulled off the queue before tearing down so
+                    // the hub still sees the partial progress.
                     cancel_token.cancel();
-                    drain.abort();
+                    let _ = drain.await;
                     drop(cancel_guard);
                     return ToolResult::err(format!(
                         "helper_ask: per-call timeout exceeded ({}s)",
@@ -355,10 +381,16 @@ impl Tool for HelperAskTool {
             None => agent_fut.await,
         };
 
+        // Wait for the drain task to finish forwarding the buffered
+        // events that the agent loop pushed before it returned. If
+        // we aborted here we'd race the drain task against the
+        // function exit and lose progress notifications that the
+        // hub was about to see.
+        let _ = drain.await;
+
         let result = match result {
             Ok(r) => r,
             Err(err) => {
-                drain.abort();
                 drop(cancel_guard);
                 // Cancellation surfaces as a typed AgentLoop error so
                 // we can echo the application-defined code-32800
@@ -372,7 +404,6 @@ impl Tool for HelperAskTool {
                 return ToolResult::err(msg);
             }
         };
-        drain.abort();
         drop(cancel_guard);
 
         // Build the structured `_meta` payload. The shape mirrors
@@ -427,6 +458,45 @@ fn build_namespaced_session_id(
         None => fresh_session_suffix(),
     };
     format!("mode2:{owner}:{suffix}")
+}
+
+/// Slice 2 streaming: project a [`StreamEvent`] into a stable JSON
+/// shape that helper_ask emits as the `data` field of an MCP
+/// `notifications/progress` envelope. Returns `None` for events that
+/// carry no caller-visible information (e.g. tool-call deltas the
+/// client doesn't need to see).
+///
+/// The wire shape is:
+///   * `{"kind": "content", "delta": "..."}`
+///   * `{"kind": "tool_progress", "stage": "start"|"done", "name": "..."}`
+///   * `{"kind": "done", "finish_reason": "..." (optional)}`
+fn stream_event_to_progress_payload(event: &StreamEvent) -> Option<Value> {
+    use zunel_providers::ToolProgress;
+    match event {
+        StreamEvent::ContentDelta(s) if !s.is_empty() => {
+            Some(json!({"kind": "content", "delta": s}))
+        }
+        StreamEvent::ContentDelta(_) => None,
+        StreamEvent::ToolProgress(progress) => match progress {
+            ToolProgress::Start { name, .. } => {
+                Some(json!({"kind": "tool_progress", "stage": "start", "name": name}))
+            }
+            ToolProgress::Done { name, ok, .. } => {
+                Some(json!({"kind": "tool_progress", "stage": "done", "name": name, "ok": ok}))
+            }
+        },
+        StreamEvent::Done(resp) => {
+            let mut payload = json!({"kind": "done"});
+            if let Some(reason) = &resp.finish_reason {
+                payload["finish_reason"] = json!(reason);
+            }
+            Some(payload)
+        }
+        // Tool-call deltas are part of how the model assembles a
+        // function-call payload — not interesting to a hub watching
+        // progress, so we drop them.
+        StreamEvent::ToolCallDelta { .. } => None,
+    }
 }
 
 fn fresh_session_suffix() -> String {
@@ -855,5 +925,99 @@ mod tests {
             ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
         let result = tool.execute(json!({"prompt": "hi"}), &ctx).await;
         assert!(!result.is_error);
+    }
+
+    #[test]
+    fn stream_event_to_progress_payload_shapes() {
+        use zunel_providers::{LLMResponse, ToolProgress, Usage};
+
+        // Content delta: forwarded as kind=content + delta.
+        let payload = stream_event_to_progress_payload(&StreamEvent::ContentDelta("hi".into()))
+            .expect("content delta yields payload");
+        assert_eq!(payload["kind"], "content");
+        assert_eq!(payload["delta"], "hi");
+
+        // Empty content delta: dropped (no payload).
+        assert!(stream_event_to_progress_payload(&StreamEvent::ContentDelta(String::new())).is_none());
+
+        // Tool start.
+        let payload = stream_event_to_progress_payload(&StreamEvent::ToolProgress(
+            ToolProgress::Start {
+                index: 0,
+                name: "echo".into(),
+            },
+        ))
+        .expect("tool start yields payload");
+        assert_eq!(payload["kind"], "tool_progress");
+        assert_eq!(payload["stage"], "start");
+        assert_eq!(payload["name"], "echo");
+
+        // Tool done.
+        let payload = stream_event_to_progress_payload(&StreamEvent::ToolProgress(
+            ToolProgress::Done {
+                index: 0,
+                name: "echo".into(),
+                ok: true,
+                snippet: "hi".into(),
+            },
+        ))
+        .expect("tool done yields payload");
+        assert_eq!(payload["stage"], "done");
+        assert_eq!(payload["ok"], true);
+
+        // Done with finish_reason.
+        let resp = LLMResponse {
+            content: None,
+            tool_calls: Vec::new(),
+            usage: Usage::default(),
+            finish_reason: Some("stop".into()),
+        };
+        let payload = stream_event_to_progress_payload(&StreamEvent::Done(resp))
+            .expect("done yields payload");
+        assert_eq!(payload["kind"], "done");
+        assert_eq!(payload["finish_reason"], "stop");
+
+        // Tool-call deltas dropped.
+        assert!(stream_event_to_progress_payload(&StreamEvent::ToolCallDelta {
+            index: 0,
+            id: None,
+            name: None,
+            arguments_fragment: None,
+        })
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn helper_ask_forwards_progress_when_sink_is_set() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path());
+        let mut ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(32);
+        ctx.progress_sink = Some(tx);
+
+        let result = tool.execute(json!({"prompt": "stream me"}), &ctx).await;
+        assert!(!result.is_error);
+
+        // FakeProvider's default `generate` impl synthesises one
+        // ContentDelta + Done. Drain anything the helper forwarded
+        // and assert the shape.
+        drop(ctx); // drop our remaining sink ref so rx eventually closes
+        let mut payloads = Vec::new();
+        while let Ok(Some(payload)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            payloads.push(payload);
+        }
+        // We expect at least one progress event for the content
+        // delta (the final response goes back via the tool result,
+        // not through the progress channel).
+        let has_content = payloads
+            .iter()
+            .any(|p| p.get("kind").and_then(Value::as_str) == Some("content"));
+        assert!(
+            has_content,
+            "expected a content progress event, saw {payloads:?}"
+        );
     }
 }
