@@ -81,11 +81,7 @@ impl ApprovalQueue {
     /// Submit a decision for an outstanding approval. Returns
     /// `Ok(())` when the lookup found the id, `Err(...)` otherwise so
     /// `helper_approve` can surface a structured error to the hub.
-    pub fn resolve(
-        &self,
-        id: &str,
-        decision: ApprovalDecision,
-    ) -> Result<(), ApprovalQueueError> {
+    pub fn resolve(&self, id: &str, decision: ApprovalDecision) -> Result<(), ApprovalQueueError> {
         let mut map = self.inner.lock().expect("approval queue mutex");
         let Some(pending) = map.remove(id) else {
             return Err(ApprovalQueueError::UnknownId(id.to_string()));
@@ -101,10 +97,7 @@ impl ApprovalQueue {
     ) -> String {
         let id = next_approval_id();
         let mut map = self.inner.lock().expect("approval queue mutex");
-        map.insert(
-            id.clone(),
-            PendingApproval { request, decider },
-        );
+        map.insert(id.clone(), PendingApproval { request, decider });
         id
     }
 
@@ -233,7 +226,10 @@ mod tests {
         let handler = QueueApprovalHandler::new(Arc::clone(&q), Duration::from_millis(50));
         let decision = handler.request(req("exec")).await;
         assert_eq!(decision, ApprovalDecision::Deny);
-        assert!(q.snapshot().is_empty(), "timed-out entry must be cleaned up");
+        assert!(
+            q.snapshot().is_empty(),
+            "timed-out entry must be cleaned up"
+        );
     }
 
     #[test]

@@ -690,14 +690,8 @@ where
         // side-by-side: the writer drains a progress channel until
         // the dispatch future resolves, then emits the final
         // response as the last event and closes.
-        return write_streaming_response(
-            stream,
-            session_id,
-            dispatcher.clone(),
-            parsed,
-            meta,
-        )
-        .await;
+        return write_streaming_response(stream, session_id, dispatcher.clone(), parsed, meta)
+            .await;
     }
 
     let responses = match &parsed {

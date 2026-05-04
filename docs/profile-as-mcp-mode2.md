@@ -1,12 +1,26 @@
 # Profile-as-MCP-Server: Mode 2 — Agent-Loop-as-Tool
 
-**Status:** First slice implemented. `zunel mcp agent --mode2` registers the
-`helper_ask` tool with caller-controlled session ids namespaced by API-key
-fingerprint, `reject` (default) and `allow_all` approval policies, and a
-CLI iteration ceiling. SSE streaming, approval forwarding, and per-call
-cancellation are deferred future work as called out in the open questions
-below. This doc captures both the product reasoning and what is actually
-live today.
+**Status:** Second slice implemented. `zunel mcp agent --mode2` registers
+`helper_ask` (always) plus `helper_pending_approvals` /  `helper_approve`
+(only when `--mode2-approval forward` is set). Slice 2 adds:
+
+- Per-call `system_prompt` override prepended to the helper's system
+  message stack and reapplied on every turn (never persisted).
+  `--mode2-disable-system-prompt` is the operator opt-out; `_meta.system_prompt`
+  ∈ `{applied, ignored}` reports what happened.
+- Per-call cancellation: hub posts `notifications/cancelled` with the
+  matching `requestId` and the in-flight call unwinds with the
+  application-defined error code `-32800` ("helper_ask: cancelled by hub").
+- `--mode2-call-timeout-secs` operator-set wallclock ceiling; on expiry
+  the helper's loop is cancelled and the caller sees a structured timeout
+  error.
+- SSE progress streaming: when the hub posts `params._meta.progressToken`
+  alongside an `Accept: text/event-stream` header, mid-call
+  `notifications/progress` events flow through the open SSE connection
+  carrying tool-progress and content deltas.
+- Polling-based approval forwarding via `helper_pending_approvals` /
+  `helper_approve` and an in-process queue, with a per-approval
+  wallclock ceiling (`--mode2-approval-timeout-secs`, default 300s).
 
 Background context: [`profile-as-mcp.md`](./profile-as-mcp.md) (Mode 1) and the
 `AgentLoop` / `SessionManager` / `ApprovalHandler` machinery in
@@ -39,14 +53,17 @@ over MCP into another agent."
 | Surface | State |
 |---------|-------|
 | `--mode2` flag | **Implemented.** Off by default; opting in registers `helper_ask` alongside Mode 1's filtered registry. |
-| `helper_ask` tool | **Implemented.** Single-JSON response, `prompt` / `session_id` / `max_iterations` args. |
+| `helper_ask` tool | **Implemented.** Args now: `prompt` / `session_id` / `max_iterations` / `system_prompt`. |
 | Caller-controlled session id | **Implemented.** Namespaced as `mode2:<caller_fingerprint>:<caller-supplied or fresh>`. Loopback-no-auth callers fall back to `anon`. |
-| `_meta` side-channel | **Implemented.** Returns `session_id`, `tools_used`, and `usage` (mapped to MCP's `_meta` convention). |
-| `--mode2-approval reject\|allow_all` | **Implemented.** `reject` is the default; `forward` is deferred. |
+| `_meta` side-channel | **Implemented.** Returns `session_id`, `tools_used`, `usage`, and (when applicable) `system_prompt: "applied"\|"ignored"`. |
+| `--mode2-approval reject\|allow_all\|forward` | **Implemented.** `reject` is the default. |
 | `--mode2-max-iterations` | **Implemented.** Hard ceiling, `min()`-ed against caller's `max_iterations` arg and the helper's `agents.defaults.max_tool_iterations`. |
-| SSE streaming | **Deferred.** Slice 2. |
-| Per-call cancellation | **Deferred.** Slice 2 (needs `AgentLoop::process_streamed` to take a `CancellationToken`). |
-| Approval forwarding | **Deferred to v3.** |
+| `--mode2-call-timeout-secs` | **Implemented (slice 2).** Per-call wallclock ceiling. |
+| `--mode2-approval-timeout-secs` | **Implemented (slice 2).** Per-approval wallclock ceiling for `--mode2-approval forward`. |
+| `--mode2-disable-system-prompt` | **Implemented (slice 2).** Operator opt-out for the `system_prompt` arg. |
+| SSE progress streaming | **Implemented (slice 2).** `params._meta.progressToken` + `Accept: text/event-stream`. |
+| Per-call cancellation | **Implemented (slice 2).** `notifications/cancelled` with `requestId`. |
+| Approval forwarding | **Implemented (slice 2).** Polling via `helper_pending_approvals` / `helper_approve`. |
 
 ## Open product questions
 
@@ -188,7 +205,7 @@ talking to itself via `helper_ask`. This avoids a second mental model
 operators have to track. If a deployment wants Mode 2 to write but Mode 1
 not to, run two agent processes — they're cheap.
 
-## Proposed v2 surface
+## Surface (slice 2 → live)
 
 ### CLI
 
@@ -196,28 +213,40 @@ not to, run two agent processes — they're cheap.
 zunel [--profile NAME] mcp agent [TRANSPORT] [AUTH] [DEPTH] [LIMITS] [TOOL GATES] [MODE 2]
 
 MODE 2 (all opt-in)
-  --mode2                          Enable the helper_ask tool. Off by default
-                                   (Mode 1 stays the only registered surface).
-  --mode2-approval <policy>        reject (default) | allow_all. Forwarding
-                                   approval requests over MCP is v3.
+  --mode2                          Enable helper_ask. Off by default; opting
+                                   in adds helper_ask to Mode 1's filtered
+                                   registry.
+  --mode2-approval <policy>        reject (default) | allow_all | forward.
+                                   `forward` also registers
+                                   helper_pending_approvals + helper_approve.
   --mode2-max-iterations N         Hard upper bound on a single helper_ask
                                    loop. Defaults to the helper's own
-                                   agents.defaults.max_iterations.
-  --mode2-stream                   Enable SSE streaming for helper_ask
-                                   responses. Off by default.
+                                   agents.defaults.max_tool_iterations.
+  --mode2-disable-system-prompt    Drop the helper_ask `system_prompt` arg
+                                   for compliance / fixed-persona deployments.
+                                   _meta.system_prompt = "ignored" reports it.
+  --mode2-call-timeout-secs N      Wallclock ceiling for one helper_ask call.
+                                   On expiry the inner AgentLoop is cancelled
+                                   and a structured timeout error is returned.
+  --mode2-approval-timeout-secs N  Wallclock ceiling for one approval-forward
+                                   round trip; default 300. Times out to
+                                   "deny" so the helper's loop unblocks.
+                                   Ignored unless --mode2-approval forward.
 ```
 
-When `--mode2` is set, the agent registers exactly one extra tool —
-`helper_ask` — alongside Mode 1's filtered registry. They coexist; you
-can have a hub that uses both `mcp_helper_read_file` (Mode 1) and
-`mcp_helper_helper_ask` (Mode 2) on the same helper.
+When `--mode2` is set, the agent registers `helper_ask` alongside Mode 1's
+filtered registry. With `--mode2-approval forward` two more tools join:
+`helper_pending_approvals` (poll the queue) and `helper_approve` (resolve
+one entry). Hubs can use Mode 1 tools and Mode 2 tools on the same helper
+without conflict.
 
-### Tool schema
+### Tool schemas
+
+`helper_ask`:
 
 ```json
 {
   "name": "helper_ask",
-  "description": "Ask the helper agent to handle a prompt with its own LLM and tool registry.",
   "inputSchema": {
     "type": "object",
     "required": ["prompt"],
@@ -225,7 +254,30 @@ can have a hub that uses both `mcp_helper_read_file` (Mode 1) and
       "prompt":         { "type": "string" },
       "session_id":     { "type": "string", "description": "Caller-supplied session key. Omit for a fresh session." },
       "max_iterations": { "type": "integer", "minimum": 1 },
-      "system_prompt":  { "type": "string", "description": "Per-call system-prompt override. Subject to helper-side allowlists." }
+      "system_prompt":  { "type": "string", "maxLength": 8192,
+                           "description": "Per-call operator persona. Prepended to the helper's skills system message every turn; never persisted. Length-capped at 8 KiB." }
+    }
+  }
+}
+```
+
+`helper_pending_approvals` and `helper_approve` are present only under
+`--mode2-approval forward`:
+
+```json
+{
+  "name": "helper_pending_approvals",
+  "inputSchema": { "type": "object", "properties": {} }
+}
+
+{
+  "name": "helper_approve",
+  "inputSchema": {
+    "type": "object",
+    "required": ["id", "decision"],
+    "properties": {
+      "id":       { "type": "string", "description": "Approval id from helper_pending_approvals." },
+      "decision": { "type": "string", "enum": ["approve", "deny"] }
     }
   }
 }
@@ -240,13 +292,53 @@ can have a hub that uses both `mcp_helper_read_file` (Mode 1) and
   ],
   "isError": false,
   "_meta": {
-    "session_id": "mode2:abc123:research-2026-04-26",
-    "iterations": 3,
-    "tools_used": ["read_file", "grep"],
-    "usage": { "input": 1234, "output": 456, "reasoning": 0, "cached": 100 }
+    "session_id":   "mode2:abc123:research-2026-04-26",
+    "tools_used":   ["read_file", "grep"],
+    "usage":        { "input": 1234, "output": 456, "reasoning": 0, "cached": 100 },
+    // present only when the call passed `system_prompt`:
+    "system_prompt": "applied" // or "ignored" if --mode2-disable-system-prompt is set
   }
 }
 ```
+
+### Streaming wire format
+
+When the request includes both `params._meta.progressToken` and an
+`Accept` header that allows `text/event-stream`, the response is a
+chunked SSE stream. Each `data:` event is a complete JSON-RPC message:
+`notifications/progress` envelopes for each forwarded `StreamEvent`,
+followed by a single final `result` envelope with the same shape as
+the non-streaming case. Wire shape of one progress event:
+
+```jsonc
+{
+  "jsonrpc": "2.0",
+  "method":  "notifications/progress",
+  "params": {
+    "progressToken": "<the caller's token>",
+    "data": { "kind": "content", "delta": "..." }
+    // OR { "kind": "tool_progress", "stage": "start" | "done", "name": "...", "ok"?: bool }
+    // OR { "kind": "done", "finish_reason"?: "..." }
+  }
+}
+```
+
+### Cancellation wire format
+
+Hub posts:
+
+```jsonc
+{
+  "jsonrpc": "2.0",
+  "method":  "notifications/cancelled",
+  "params":  { "requestId": <id of the in-flight tools/call>, "reason"?: "..." }
+}
+```
+
+The dispatcher routes this to the `CancelRegistry` entry registered by
+the in-flight `helper_ask`; the helper's `AgentLoop` returns
+`Error::Cancelled` and the call surfaces an `isError: true` text
+response: `helper_ask: cancelled by hub`.
 
 `_meta` is the MCP convention for non-content metadata; clients that
 don't recognize it ignore it without breaking. The `usage` block matches

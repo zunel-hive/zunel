@@ -109,8 +109,8 @@ mod tests {
         let reg = CancelRegistry::new();
         let g1 = reg.register(RpcId::Number(1));
         let g2 = reg.register(RpcId::Number(2));
-        assert_ne!(g1.token().is_cancelled(), true);
-        assert_ne!(g2.token().is_cancelled(), true);
+        assert!(!g1.token().is_cancelled());
+        assert!(!g2.token().is_cancelled());
         assert_eq!(reg.len(), 2);
     }
 

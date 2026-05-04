@@ -213,8 +213,8 @@ mod rpc_id_tests {
 
     #[test]
     fn rpc_id_rejects_float() {
-        // serde_json represents 3.14 as Number but as_i64 fails;
-        // we treat that as "not a routable id".
-        assert!(RpcId::from_json(&json!(3.14)).is_none());
+        // serde_json represents non-integer numbers as Number but
+        // as_i64 fails; we treat that as "not a routable id".
+        assert!(RpcId::from_json(&json!(2.5)).is_none());
     }
 }

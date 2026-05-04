@@ -56,8 +56,8 @@ impl Tool for HelperPendingApprovalsTool {
     async fn execute(&self, _args: Value, _ctx: &ToolContext) -> ToolResult {
         let entries = self.queue.snapshot();
         let count = entries.len();
-        let body = serde_json::to_string(&json!({"approvals": entries}))
-            .unwrap_or_else(|_| "{}".into());
+        let body =
+            serde_json::to_string(&json!({"approvals": entries})).unwrap_or_else(|_| "{}".into());
         ToolResult::ok(body).with_meta(json!({"count": count}))
     }
 }
@@ -199,9 +199,7 @@ mod tests {
         // Resolve it so the spawned task doesn't dangle until the
         // 60s timeout.
         let id = entries[0]["id"].as_str().unwrap();
-        queue_clone
-            .resolve(id, ApprovalDecision::Deny)
-            .unwrap();
+        queue_clone.resolve(id, ApprovalDecision::Deny).unwrap();
         let _ = task.await;
         // Quiet the unused tx warning.
         drop(tx);

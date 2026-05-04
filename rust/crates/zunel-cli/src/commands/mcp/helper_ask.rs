@@ -309,13 +309,15 @@ impl Tool for HelperAskTool {
                 ));
             }
         }
-        let (effective_system_prompt, system_prompt_status): (Option<String>, Option<&'static str>) =
-            match (raw_system_prompt, self.system_prompt_disabled) {
-                (None, _) => (None, None),
-                (Some(s), _) if s.is_empty() => (None, None),
-                (Some(_), true) => (None, Some("ignored")),
-                (Some(s), false) => (Some(s), Some("applied")),
-            };
+        let (effective_system_prompt, system_prompt_status): (
+            Option<String>,
+            Option<&'static str>,
+        ) = match (raw_system_prompt, self.system_prompt_disabled) {
+            (None, _) => (None, None),
+            (Some(s), _) if s.is_empty() => (None, None),
+            (Some(_), true) => (None, Some("ignored")),
+            (Some(s), false) => (Some(s), Some("applied")),
+        };
 
         // Per-call AgentLoop. We rebuild from scratch so two
         // concurrent helper_ask calls don't share approval / token-
@@ -351,11 +353,10 @@ impl Tool for HelperAskTool {
         // a fresh never-cancelled token. Holding the guard across
         // the call ensures a panic / early return removes the
         // registry entry automatically (RAII).
-        let cancel_guard =
-            match (self.cancel_registry.as_ref(), ctx.rpc_id.as_ref()) {
-                (Some(reg), Some(id)) => Some(reg.register(id.clone())),
-                _ => None,
-            };
+        let cancel_guard = match (self.cancel_registry.as_ref(), ctx.rpc_id.as_ref()) {
+            (Some(reg), Some(id)) => Some(reg.register(id.clone())),
+            _ => None,
+        };
         let cancel_token = cancel_guard
             .as_ref()
             .map(|g| g.token())
@@ -835,7 +836,8 @@ mod tests {
     #[tokio::test]
     async fn helper_ask_reports_ignored_when_disable_flag_is_set() {
         let tmp = tempdir().expect("tmpdir");
-        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path()).with_system_prompt_disabled(true);
+        let tool =
+            make_tool(HelperApprovalPolicy::Reject, tmp.path()).with_system_prompt_disabled(true);
         let ctx =
             ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
         let result = tool
@@ -856,10 +858,7 @@ mod tests {
             ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
         let too_big = "a".repeat(MAX_SYSTEM_PROMPT_BYTES + 1);
         let result = tool
-            .execute(
-                json!({"prompt": "go", "system_prompt": too_big}),
-                &ctx,
-            )
+            .execute(json!({"prompt": "go", "system_prompt": too_big}), &ctx)
             .await;
         assert!(result.is_error, "expected oversize rejection");
         assert!(
@@ -946,9 +945,7 @@ mod tests {
             assert!(registry_clone.cancel(&zunel_tools::RpcId::String("req-cancel-1".into())));
         });
 
-        let result = tool
-            .execute(json!({"prompt": "long task"}), &ctx)
-            .await;
+        let result = tool.execute(json!({"prompt": "long task"}), &ctx).await;
         assert!(result.is_error, "expected cancel error: {}", result.content);
         assert!(
             result.content.contains("cancelled"),
@@ -966,7 +963,11 @@ mod tests {
             ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
 
         let result = tool.execute(json!({"prompt": "long task"}), &ctx).await;
-        assert!(result.is_error, "expected timeout error: {}", result.content);
+        assert!(
+            result.is_error,
+            "expected timeout error: {}",
+            result.content
+        );
         assert!(
             result.content.contains("timeout"),
             "expected timeout message: {}",
@@ -996,30 +997,30 @@ mod tests {
         assert_eq!(payload["delta"], "hi");
 
         // Empty content delta: dropped (no payload).
-        assert!(stream_event_to_progress_payload(&StreamEvent::ContentDelta(String::new())).is_none());
+        assert!(
+            stream_event_to_progress_payload(&StreamEvent::ContentDelta(String::new())).is_none()
+        );
 
         // Tool start.
-        let payload = stream_event_to_progress_payload(&StreamEvent::ToolProgress(
-            ToolProgress::Start {
+        let payload =
+            stream_event_to_progress_payload(&StreamEvent::ToolProgress(ToolProgress::Start {
                 index: 0,
                 name: "echo".into(),
-            },
-        ))
-        .expect("tool start yields payload");
+            }))
+            .expect("tool start yields payload");
         assert_eq!(payload["kind"], "tool_progress");
         assert_eq!(payload["stage"], "start");
         assert_eq!(payload["name"], "echo");
 
         // Tool done.
-        let payload = stream_event_to_progress_payload(&StreamEvent::ToolProgress(
-            ToolProgress::Done {
+        let payload =
+            stream_event_to_progress_payload(&StreamEvent::ToolProgress(ToolProgress::Done {
                 index: 0,
                 name: "echo".into(),
                 ok: true,
                 snippet: "hi".into(),
-            },
-        ))
-        .expect("tool done yields payload");
+            }))
+            .expect("tool done yields payload");
         assert_eq!(payload["stage"], "done");
         assert_eq!(payload["ok"], true);
 
@@ -1036,13 +1037,15 @@ mod tests {
         assert_eq!(payload["finish_reason"], "stop");
 
         // Tool-call deltas dropped.
-        assert!(stream_event_to_progress_payload(&StreamEvent::ToolCallDelta {
-            index: 0,
-            id: None,
-            name: None,
-            arguments_fragment: None,
-        })
-        .is_none());
+        assert!(
+            stream_event_to_progress_payload(&StreamEvent::ToolCallDelta {
+                index: 0,
+                id: None,
+                name: None,
+                arguments_fragment: None,
+            })
+            .is_none()
+        );
     }
 
     #[tokio::test]

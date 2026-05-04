@@ -647,8 +647,8 @@ mod tests {
         let guard = registry.register(zunel_tools::RpcId::String("req-cancel-test".into()));
         let token = guard.token();
 
-        let dispatcher = dispatcher_for(registry_with_one_tool())
-            .with_cancel_registry(Arc::clone(&registry));
+        let dispatcher =
+            dispatcher_for(registry_with_one_tool()).with_cancel_registry(Arc::clone(&registry));
 
         let response = dispatcher
             .dispatch(
@@ -673,8 +673,8 @@ mod tests {
     async fn notifications_cancelled_with_unknown_id_is_a_safe_noop() {
         use crate::commands::mcp::cancel_registry::CancelRegistry;
         let registry = CancelRegistry::new();
-        let dispatcher = dispatcher_for(registry_with_one_tool())
-            .with_cancel_registry(Arc::clone(&registry));
+        let dispatcher =
+            dispatcher_for(registry_with_one_tool()).with_cancel_registry(Arc::clone(&registry));
 
         let response = dispatcher
             .dispatch(

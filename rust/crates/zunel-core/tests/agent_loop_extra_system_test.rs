@@ -78,8 +78,8 @@ fn make_loop_with_extra(
         max_tool_iterations: Some(1),
         ..Default::default()
     };
-    let mut agent = AgentLoop::with_sessions(provider, defaults, manager)
-        .with_workspace(workspace.clone());
+    let mut agent =
+        AgentLoop::with_sessions(provider, defaults, manager).with_workspace(workspace.clone());
     if let Some(s) = extra {
         agent = agent.with_extra_system_message(Some(s.to_string()));
     }
@@ -101,9 +101,7 @@ async fn extra_system_message_prepends_at_index_zero() {
     let first_turn = history.first().expect("provider was called");
     assert_eq!(first_turn[0].role, Role::System);
     assert!(
-        first_turn[0]
-            .content
-            .contains("You are a research helper."),
+        first_turn[0].content.contains("You are a research helper."),
         "expected extra system message at index 0, got {:?}",
         first_turn[0].content
     );
