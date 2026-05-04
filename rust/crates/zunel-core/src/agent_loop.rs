@@ -84,6 +84,13 @@ pub struct AgentLoop {
     /// message, the value is reapplied on every turn from the live
     /// builder, never written to disk.
     extra_system_message: Option<String>,
+    /// Per-loop cancellation token. Mode 2's `helper_ask` swaps in a
+    /// fresh token registered with the dispatcher's [`CancelRegistry`]
+    /// so a `notifications/cancelled` from the hub interrupts the
+    /// helper's loop. Defaults to a never-cancelled token, which
+    /// matches the legacy "loops don't honour cancellation" behaviour
+    /// for callers that didn't opt in.
+    cancel: tokio_util::sync::CancellationToken,
     /// When `true`, [`process_inbound_once`] appends a one-line token
     /// footer to the outbound message before publishing it on the bus.
     /// Wired from `channels.showTokenFooter` so it follows the same
@@ -128,6 +135,7 @@ impl AgentLoop {
             workspace: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
             skills: None,
             extra_system_message: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
             show_token_footer: false,
         }
     }
@@ -149,6 +157,7 @@ impl AgentLoop {
             workspace: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
             skills: None,
             extra_system_message: None,
+            cancel: tokio_util::sync::CancellationToken::new(),
             show_token_footer: false,
         }
     }
@@ -212,6 +221,20 @@ impl AgentLoop {
     /// forward whatever string came off the wire.
     pub fn with_extra_system_message(mut self, msg: Option<String>) -> Self {
         self.extra_system_message = msg.filter(|s| !s.is_empty());
+        self
+    }
+
+    /// Inject a per-loop cancellation token. Mode 2's `helper_ask`
+    /// uses this to register the helper's loop under the inbound
+    /// JSON-RPC id so a `notifications/cancelled` from the hub can
+    /// interrupt mid-turn. The token is forwarded to every
+    /// [`ToolContext`] the loop hands to its tools so individual
+    /// tool runs honour the same cancellation.
+    ///
+    /// Defaults to a never-cancelled token; legacy callers that
+    /// don't opt in see no behavioural change.
+    pub fn with_cancel(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
+        self.cancel = cancel;
         self
     }
 
@@ -473,6 +496,7 @@ impl AgentLoop {
                     approval_scope: self.approval_scope,
                     hook: None,
                     trim_budgets: budgets,
+                    cancel: self.cancel.clone(),
                 },
                 sink,
             )

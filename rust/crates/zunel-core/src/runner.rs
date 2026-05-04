@@ -92,6 +92,16 @@ pub struct AgentRunSpec {
     /// in-runner constants so legacy tests that don't construct this
     /// field keep working.
     pub trim_budgets: TrimBudgets,
+    /// Per-turn cancellation token. The runner checks this between
+    /// every iteration, between every tool call inside one
+    /// iteration, and between every streamed event from the
+    /// provider; when fired the run unwinds with
+    /// [`crate::Error::Cancelled`]. Forwarded onto the
+    /// [`ToolContext`] so individual tools that have their own
+    /// cancel-aware select loops also notice. Defaults to a
+    /// never-cancelled token so existing callers keep their
+    /// "uninterruptible" behaviour.
+    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 impl Default for AgentRunSpec {
@@ -107,6 +117,7 @@ impl Default for AgentRunSpec {
             approval_scope: ApprovalScope::default(),
             hook: None,
             trim_budgets: TrimBudgets::default(),
+            cancel: tokio_util::sync::CancellationToken::new(),
         }
     }
 }
@@ -148,7 +159,12 @@ impl AgentRunner {
     ) -> Result<AgentRunResult, crate::Error> {
         let mut messages = spec.initial_messages.clone();
         let mut tools_used: Vec<String> = Vec::new();
-        let ctx = ToolContext::new_with_workspace(spec.workspace.clone(), spec.session_key.clone());
+        let mut ctx =
+            ToolContext::new_with_workspace(spec.workspace.clone(), spec.session_key.clone());
+        // Forward the run's cancel token to every tool we hand the
+        // context to. Tools that already select on `ctx.cancel` will
+        // bail out the same instant the run unwinds.
+        ctx.cancel = spec.cancel.clone();
 
         let max_iter = if spec.max_iterations == 0 {
             15
@@ -167,6 +183,12 @@ impl AgentRunner {
         let mut total_usage = Usage::default();
 
         'outer: for iteration in 0..max_iter {
+            // Cancel-check 1: before we even ask the provider for the
+            // next iteration, bail out if the hub cancelled the call
+            // since the previous iteration finished.
+            if spec.cancel.is_cancelled() {
+                return Err(crate::Error::Cancelled);
+            }
             tracing::debug!(iteration, "agent iteration");
             let hook = spec.hook.as_ref();
             if let Some(hook) = hook {
@@ -185,7 +207,20 @@ impl AgentRunner {
                 let mut acc = ToolCallAccumulator::default();
                 let mut content = String::new();
                 let mut finish_reason: Option<String> = None;
-                while let Some(event) = stream.next().await {
+                loop {
+                    // Cancel-check 2: race the stream against the
+                    // cancel token. Cancelling mid-stream beats waiting
+                    // for the provider to give us another delta —
+                    // important for long completions / reasoning
+                    // bursts.
+                    let next_event = tokio::select! {
+                        biased;
+                        _ = spec.cancel.cancelled() => {
+                            return Err(crate::Error::Cancelled);
+                        }
+                        event = stream.next() => event,
+                    };
+                    let Some(event) = next_event else { break };
                     let event = event.map_err(crate::Error::Provider)?;
                     let _ = sink.send(event.clone()).await;
                     match &event {
@@ -271,6 +306,14 @@ impl AgentRunner {
             }
             let mut iteration_results = Vec::new();
             for call in &calls {
+                // Cancel-check 3: between two tool calls in the same
+                // iteration. Important when one call has just finished
+                // (so the cancel select didn't fire mid-stream) and
+                // another is queued — we don't want to drag the user
+                // through unwanted side effects.
+                if spec.cancel.is_cancelled() {
+                    return Err(crate::Error::Cancelled);
+                }
                 tools_used.push(call.name.clone());
                 let _ = sink
                     .send(StreamEvent::ToolProgress(ToolProgress::Start {
