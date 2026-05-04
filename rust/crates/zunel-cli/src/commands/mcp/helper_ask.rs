@@ -80,7 +80,20 @@ pub struct HelperAskTool {
     /// call can spend. Defaults to the helper's own
     /// `agents.defaults.max_tool_iterations` when `None`.
     max_iterations_cap: Option<usize>,
+    /// When `true`, the tool ignores any caller-supplied
+    /// `system_prompt` arg and surfaces an `_meta.system_prompt`
+    /// diagnostic so the hub can see why its prompt didn't take.
+    /// Wired from `--mode2-disable-system-prompt`.
+    system_prompt_disabled: bool,
 }
+
+/// Maximum length (UTF-8 bytes) of a caller-supplied `system_prompt`.
+/// Bigger inputs are rejected with a structured error rather than
+/// silently truncated, since silent truncation would mid-sentence the
+/// caller's persona. 8 KiB is enough for any realistic operator
+/// override and small enough that we never push the helper's own
+/// system-message budget.
+pub const MAX_SYSTEM_PROMPT_BYTES: usize = 8 * 1024;
 
 impl HelperAskTool {
     pub fn new(
@@ -100,7 +113,17 @@ impl HelperAskTool {
             workspace,
             approval_policy,
             max_iterations_cap,
+            system_prompt_disabled: false,
         }
+    }
+
+    /// Builder hook used by the CLI when `--mode2-disable-system-prompt`
+    /// is set. Once disabled the policy is per-tool and cannot be
+    /// re-enabled per-call — the caller has no path to forge a way
+    /// in.
+    pub fn with_system_prompt_disabled(mut self, disabled: bool) -> Self {
+        self.system_prompt_disabled = disabled;
+        self
     }
 
     /// Resolve the effective iteration ceiling for one call. The
@@ -148,6 +171,11 @@ impl Tool for HelperAskTool {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Per-call upper bound on tool-loop iterations. Capped against the helper's CLI ceiling and its own configured default."
+                },
+                "system_prompt": {
+                    "type": "string",
+                    "maxLength": MAX_SYSTEM_PROMPT_BYTES as u64,
+                    "description": "Optional operator persona prepended ahead of the helper's skills system message for this call only. Not persisted into the helper's session log. The helper may be configured (--mode2-disable-system-prompt) to ignore this field; in that case the tool surfaces _meta.system_prompt='ignored'."
                 }
             }
         })
@@ -185,6 +213,40 @@ impl Tool for HelperAskTool {
             caller_supplied_session.as_deref(),
         );
 
+        // Resolve the operator-persona override. Three opposed
+        // outcomes feed `_meta.system_prompt` so the hub can debug:
+        //   * "applied"  — caller passed a non-empty value, server
+        //                  honoured it, AgentLoop got it via
+        //                  with_extra_system_message.
+        //   * "ignored"  — caller passed a value but the server is
+        //                  configured to drop it (--mode2-
+        //                  disable-system-prompt). The agent runs
+        //                  with no extra persona.
+        //   * absent     — caller omitted the field. We don't surface
+        //                  `_meta.system_prompt` at all in that case
+        //                  so the meta block stays compact.
+        let raw_system_prompt = args
+            .get("system_prompt")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(ref s) = raw_system_prompt {
+            if s.len() > MAX_SYSTEM_PROMPT_BYTES {
+                return ToolResult::err(format!(
+                    "helper_ask: `system_prompt` exceeds maximum length \
+                     ({} bytes, max {})",
+                    s.len(),
+                    MAX_SYSTEM_PROMPT_BYTES
+                ));
+            }
+        }
+        let (effective_system_prompt, system_prompt_status): (Option<String>, Option<&'static str>) =
+            match (raw_system_prompt, self.system_prompt_disabled) {
+                (None, _) => (None, None),
+                (Some(s), _) if s.is_empty() => (None, None),
+                (Some(_), true) => (None, Some("ignored")),
+                (Some(s), false) => (Some(s), Some("applied")),
+            };
+
         // Per-call AgentLoop. We rebuild from scratch so two
         // concurrent helper_ask calls don't share approval / token-
         // accounting state. All inputs are Arc-backed or cheap to
@@ -211,7 +273,8 @@ impl Tool for HelperAskTool {
                 // flag's value is moot — set it true for consistency with
                 // the docs.
                 .with_approval_required(true)
-                .with_approval_scope(ApprovalScope::All);
+                .with_approval_scope(ApprovalScope::All)
+                .with_extra_system_message(effective_system_prompt);
 
         // Drain the streaming sink locally; the response is single-JSON,
         // so deltas aren't forwarded anywhere. The drain task is aborted
@@ -231,7 +294,7 @@ impl Tool for HelperAskTool {
         // Build the structured `_meta` payload. The shape mirrors
         // `docs/profile-as-mcp-mode2.md` so callers that already
         // parse it can rely on the field set.
-        let meta = json!({
+        let mut meta = json!({
             "session_id": session_id,
             "tools_used": result.tools_used,
             "usage": {
@@ -241,6 +304,9 @@ impl Tool for HelperAskTool {
                 "cached": result.usage.cached_tokens,
             },
         });
+        if let Some(status) = system_prompt_status {
+            meta["system_prompt"] = json!(status);
+        }
 
         let content = if result.content.is_empty() {
             // Empty assistant text is a real outcome (e.g. the model
@@ -516,5 +582,78 @@ mod tests {
             .await;
         let meta = result.meta.expect("_meta");
         assert_eq!(meta["session_id"], "mode2:anon:loopback-dev");
+    }
+
+    #[tokio::test]
+    async fn helper_ask_applies_system_prompt_and_reports_status_in_meta() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path());
+        let ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+
+        let result = tool
+            .execute(
+                json!({
+                    "prompt": "go",
+                    "system_prompt": "You are a research helper.",
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+        let meta = result.meta.expect("_meta");
+        assert_eq!(meta["system_prompt"], "applied");
+    }
+
+    #[tokio::test]
+    async fn helper_ask_omits_system_prompt_status_when_caller_omits_field() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path());
+        let ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        let result = tool.execute(json!({"prompt": "go"}), &ctx).await;
+        let meta = result.meta.expect("_meta");
+        assert!(
+            meta.get("system_prompt").is_none(),
+            "no system_prompt key in meta when caller omits it: {meta}"
+        );
+    }
+
+    #[tokio::test]
+    async fn helper_ask_reports_ignored_when_disable_flag_is_set() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path()).with_system_prompt_disabled(true);
+        let ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        let result = tool
+            .execute(
+                json!({"prompt": "go", "system_prompt": "ignored persona"}),
+                &ctx,
+            )
+            .await;
+        let meta = result.meta.expect("_meta");
+        assert_eq!(meta["system_prompt"], "ignored");
+    }
+
+    #[tokio::test]
+    async fn helper_ask_rejects_oversized_system_prompt() {
+        let tmp = tempdir().expect("tmpdir");
+        let tool = make_tool(HelperApprovalPolicy::Reject, tmp.path());
+        let ctx =
+            ToolContext::new_with_workspace(tmp.path().to_path_buf(), "mcp-agent:test".into());
+        let too_big = "a".repeat(MAX_SYSTEM_PROMPT_BYTES + 1);
+        let result = tool
+            .execute(
+                json!({"prompt": "go", "system_prompt": too_big}),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_error, "expected oversize rejection");
+        assert!(
+            result.content.contains("system_prompt"),
+            "error mentions field name: {}",
+            result.content
+        );
     }
 }
