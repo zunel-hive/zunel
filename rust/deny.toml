@@ -30,6 +30,19 @@ ignore = [
     # against a newer hyper-rustls.
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
+
+    # rustls-webpki <0.103.13 reachable panic in CRL parsing
+    # (`BorrowedCertRevocationList::from_der` /
+    # `OwnedCertRevocationList::from_der` mishandle a syntactically valid
+    # empty `BIT STRING` in `IssuingDistributionPoint.onlySomeReasons`).
+    # The advisory itself notes "Applications that do not use CRLs are
+    # not affected." zunel does not load or verify CRLs anywhere; the
+    # only path into vulnerable rustls-webpki 0.101.7 is via
+    # `aws-smithy-http-client -> rustls 0.21.12`, which we use only to
+    # talk to AWS service endpoints (sso/sts/bedrock/ssooidc) — those
+    # responses do not deliver attacker-controlled CRLs. Drop once
+    # aws-smithy-http-client picks up a newer rustls.
+    "RUSTSEC-2026-0104",
 ]
 
 [licenses]
