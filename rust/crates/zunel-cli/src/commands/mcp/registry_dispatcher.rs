@@ -96,6 +96,10 @@ impl RegistryDispatcher {
         // (Mode 2's `helper_ask`, future audit tools) read this from
         // the context. Loopback-no-auth runs leave it as `None`.
         ctx.caller_fingerprint = meta.caller_fingerprint.clone();
+        // Slice 2 cancellation: helper_ask reads `rpc_id` to register
+        // a cancellation token under the inbound JSON-RPC id so a
+        // later `notifications/cancelled` can interrupt the call.
+        ctx.rpc_id = meta.rpc_id.clone();
         // ToolRegistry::execute always returns Ok (errors are folded
         // into ToolResult::is_error) so the unwrap is total here. Use
         // `expect` defensively to surface any future Infallible
@@ -353,6 +357,7 @@ mod tests {
                 &DispatchMeta {
                     call_depth: Some(3),
                     caller_fingerprint: None,
+                    rpc_id: None,
                 },
             )
             .await
@@ -460,6 +465,94 @@ mod tests {
             .lock()
             .expect("captured slot")
             .expect("depth captured");
+        assert_eq!(observed, None);
+    }
+
+    /// Tool that captures the inbound JSON-RPC id from its
+    /// `ToolContext` so the dispatcher's slice-2 plumbing can be
+    /// asserted in isolation.
+    struct RpcIdCapturingTool {
+        captured: Arc<Mutex<Option<Option<zunel_tools::RpcId>>>>,
+    }
+
+    #[async_trait]
+    impl Tool for RpcIdCapturingTool {
+        fn name(&self) -> &'static str {
+            "rpc_probe"
+        }
+        fn description(&self) -> &'static str {
+            "Capture rpc_id"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+        async fn execute(&self, _args: Value, ctx: &ToolContext) -> ToolResult {
+            *self.captured.lock().expect("captured slot") = Some(ctx.rpc_id.clone());
+            ToolResult::ok("captured")
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_meta_rpc_id_lands_on_tool_context() {
+        let captured: Arc<Mutex<Option<Option<zunel_tools::RpcId>>>> = Arc::new(Mutex::new(None));
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(RpcIdCapturingTool {
+            captured: captured.clone(),
+        }));
+        let dispatcher = dispatcher_for(reg);
+
+        let _ = dispatcher
+            .dispatch(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": "req-42",
+                    "method": "tools/call",
+                    "params": {"name": "rpc_probe", "arguments": {}}
+                }),
+                &DispatchMeta {
+                    call_depth: None,
+                    caller_fingerprint: None,
+                    rpc_id: Some(zunel_tools::RpcId::String("req-42".into())),
+                },
+            )
+            .await
+            .expect("response");
+
+        let observed = captured
+            .lock()
+            .expect("captured slot")
+            .clone()
+            .expect("rpc_id captured");
+        assert_eq!(observed, Some(zunel_tools::RpcId::String("req-42".into())));
+    }
+
+    #[tokio::test]
+    async fn dispatch_meta_default_leaves_rpc_id_unset() {
+        let captured: Arc<Mutex<Option<Option<zunel_tools::RpcId>>>> = Arc::new(Mutex::new(None));
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(RpcIdCapturingTool {
+            captured: captured.clone(),
+        }));
+        let dispatcher = dispatcher_for(reg);
+
+        let _ = dispatcher
+            .dispatch(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {"name": "rpc_probe", "arguments": {}}
+                }),
+                &DispatchMeta::default(),
+            )
+            .await
+            .expect("response");
+
+        let observed = captured
+            .lock()
+            .expect("captured slot")
+            .clone()
+            .expect("rpc_id captured");
         assert_eq!(observed, None);
     }
 }

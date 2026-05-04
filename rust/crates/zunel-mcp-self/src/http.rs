@@ -665,14 +665,23 @@ where
 
     let meta = DispatchMeta {
         call_depth: request.call_depth,
-        caller_fingerprint,
+        caller_fingerprint: caller_fingerprint.clone(),
+        rpc_id: parsed.get("id").and_then(zunel_tools::RpcId::from_json),
     };
 
     let responses = match &parsed {
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                if let Some(resp) = dispatcher.dispatch(item, &meta).await {
+                // Each batch item carries its own JSON-RPC id; build a
+                // per-item DispatchMeta so a single batched
+                // `notifications/cancelled` can target the right call.
+                let item_meta = DispatchMeta {
+                    call_depth: request.call_depth,
+                    caller_fingerprint: caller_fingerprint.clone(),
+                    rpc_id: item.get("id").and_then(zunel_tools::RpcId::from_json),
+                };
+                if let Some(resp) = dispatcher.dispatch(item, &item_meta).await {
                     out.push(resp);
                 }
             }

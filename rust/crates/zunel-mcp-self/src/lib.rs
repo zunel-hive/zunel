@@ -19,6 +19,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value;
+use zunel_tools::RpcId;
 
 pub mod access_log;
 pub mod handlers;
@@ -52,6 +53,12 @@ pub struct DispatchMeta {
     /// Mode 2's `helper_ask` reads this to namespace per-caller
     /// session ids; other dispatchers ignore it.
     pub caller_fingerprint: Option<String>,
+    /// Parsed JSON-RPC `id` from the inbound request. `None` for
+    /// notifications (no id) or when the transport hasn't been told
+    /// about the wire-level id (stdio dispatch, in-process tests).
+    /// Slice 2's `helper_ask` reads this to register a cancel token
+    /// in the dispatcher's `CancelRegistry`.
+    pub rpc_id: Option<RpcId>,
 }
 
 /// JSON-RPC message dispatcher. Receives the parsed request envelope
