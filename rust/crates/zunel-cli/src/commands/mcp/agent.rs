@@ -127,15 +127,18 @@ pub(super) async fn run(args: McpAgentArgs, config_path: Option<&Path>) -> Resul
             .await
             .context("building provider for Mode 2")?;
         let sessions = Arc::new(SessionManager::new(&workspace));
-        registry.register(Arc::new(HelperAskTool::new(
-            provider,
-            cfg.agents.defaults.clone(),
-            sessions,
-            inner_registry,
-            workspace.clone(),
-            approval_policy,
-            args.mode2_max_iterations,
-        )));
+        registry.register(Arc::new(
+            HelperAskTool::new(
+                provider,
+                cfg.agents.defaults.clone(),
+                sessions,
+                inner_registry,
+                workspace.clone(),
+                approval_policy,
+                args.mode2_max_iterations,
+            )
+            .with_system_prompt_disabled(args.mode2_disable_system_prompt),
+        ));
     }
     let identity = DispatcherIdentity {
         server_name: format!("zunel-agent:{profile}"),

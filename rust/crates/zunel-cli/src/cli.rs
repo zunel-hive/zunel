@@ -239,6 +239,15 @@ pub struct McpAgentArgs {
     #[arg(long = "mode2-max-iterations", requires = "mode2")]
     pub mode2_max_iterations: Option<usize>,
 
+    /// Drop any `system_prompt` arg passed to `helper_ask`. The
+    /// helper still answers the call but runs with no operator
+    /// persona override; `_meta.system_prompt = "ignored"` tells
+    /// the hub why its prompt didn't take. Use this when the
+    /// helper's persona must be fixed by the operator running
+    /// `zunel mcp agent` (compliance, fleet roll-out).
+    #[arg(long = "mode2-disable-system-prompt", requires = "mode2")]
+    pub mode2_disable_system_prompt: bool,
+
     /// Print a paste-ready `tools.mcpServers.<name>` snippet for this
     /// profile to stdout and exit without binding the socket. The
     /// snippet uses an `${ENV}` reference for the bearer token rather
