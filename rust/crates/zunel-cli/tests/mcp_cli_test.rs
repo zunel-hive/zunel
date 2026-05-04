@@ -663,11 +663,16 @@ async fn cli_mcp_serve_slack_exposes_full_tool_catalog_and_can_post() {
         "slack_search_messages",
         "slack_search_users",
         "slack_search_files",
+        "slack_search_channels",
         "slack_list_users",
         "slack_user_info",
         "slack_permalink",
         "slack_post_as_me",
         "slack_dm_self",
+        "slack_schedule_message",
+        "slack_create_canvas",
+        "slack_read_canvas",
+        "slack_update_canvas",
     ] {
         assert!(
             names.contains(expected),
@@ -861,13 +866,23 @@ async fn cli_mcp_serve_slack_honors_user_token_read_only_flag() {
         names.contains(&"slack_channel_history"),
         "read tools should still be exposed: {names:?}"
     );
+    for hidden in &[
+        "slack_post_as_me",
+        "slack_dm_self",
+        "slack_schedule_message",
+        "slack_create_canvas",
+        "slack_update_canvas",
+    ] {
+        assert!(
+            !names.contains(hidden),
+            "userTokenReadOnly must hide {hidden}: {names:?}"
+        );
+    }
+    // `slack_read_canvas` is read-only and stays exposed; this guards
+    // against accidentally folding it into WRITE_TOOLS in the future.
     assert!(
-        !names.contains(&"slack_post_as_me"),
-        "userTokenReadOnly must hide slack_post_as_me: {names:?}"
-    );
-    assert!(
-        !names.contains(&"slack_dm_self"),
-        "userTokenReadOnly must hide slack_dm_self: {names:?}"
+        names.contains(&"slack_read_canvas"),
+        "slack_read_canvas should remain exposed in read-only mode: {names:?}"
     );
 
     let refused = client
@@ -882,4 +897,29 @@ async fn cli_mcp_serve_slack_honors_user_token_read_only_flag() {
         refused.contains("\"error\":\"user_token_read_only\""),
         "{refused}"
     );
+
+    // Each of the new write tools must also defense-in-depth refuse a
+    // direct call when read-only is on (a malicious host that built its
+    // own tool catalog and dispatched anyway must not be able to bypass
+    // the safety knob).
+    for (tool, payload) in [
+        (
+            "slack_schedule_message",
+            serde_json::json!({"channel": "C42", "text": "x", "post_at": 9_999_999_999_i64}),
+        ),
+        (
+            "slack_create_canvas",
+            serde_json::json!({"title": "x", "content": "y"}),
+        ),
+        (
+            "slack_update_canvas",
+            serde_json::json!({"canvas_id": "F1", "action": "append", "content": "y"}),
+        ),
+    ] {
+        let refused = client.call_tool(tool, payload, 5).await.unwrap();
+        assert!(
+            refused.contains("\"error\":\"user_token_read_only\""),
+            "{tool} must refuse under read-only: {refused}"
+        );
+    }
 }

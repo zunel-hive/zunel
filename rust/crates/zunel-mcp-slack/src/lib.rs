@@ -23,7 +23,13 @@ use serde_json::{json, Value};
 /// authenticated user (i.e. `chat.postMessage`). These are gated by the
 /// `channels.slack.userTokenReadOnly` and `channels.slack.writeAllow`
 /// config knobs.
-const WRITE_TOOLS: &[&str] = &["slack_post_as_me", "slack_dm_self"];
+const WRITE_TOOLS: &[&str] = &[
+    "slack_post_as_me",
+    "slack_dm_self",
+    "slack_schedule_message",
+    "slack_create_canvas",
+    "slack_update_canvas",
+];
 
 /// Resolved safety posture for the Slack write surface, derived from
 /// `channels.slack.*` once per dispatch. Centralizes the config read so
@@ -92,28 +98,36 @@ pub async fn call_tool(name: &str, args: &Value) -> Result<String> {
     match name {
         "slack_whoami" => Ok(slack_whoami()),
         "slack_channel_history" => {
-            let channel = required_str(args, "channel")?;
+            let raw = required_str(args, "channel")?;
+            let resolved = match resolve_channel_or_open_dm(raw).await? {
+                ChannelResolution::Direct(id) => id,
+                ChannelResolution::OpenError(err) => return Ok(serde_json::to_string(&err)?),
+            };
             let mut params = vec![
-                ("channel".to_string(), channel.to_string()),
+                ("channel".to_string(), resolved.clone()),
                 ("limit".to_string(), limit_arg(args, 50).to_string()),
             ];
             push_optional(args, &mut params, "oldest");
             push_optional(args, &mut params, "latest");
             push_optional(args, &mut params, "cursor");
             let data = slack_api_call("conversations.history", params).await?;
-            Ok(render_history(data, channel))
+            Ok(render_history(data, &resolved))
         }
         "slack_channel_replies" => {
-            let channel = required_str(args, "channel")?;
+            let raw = required_str(args, "channel")?;
             let ts = required_str(args, "ts")?;
+            let resolved = match resolve_channel_or_open_dm(raw).await? {
+                ChannelResolution::Direct(id) => id,
+                ChannelResolution::OpenError(err) => return Ok(serde_json::to_string(&err)?),
+            };
             let mut params = vec![
-                ("channel".to_string(), channel.to_string()),
+                ("channel".to_string(), resolved.clone()),
                 ("ts".to_string(), ts.to_string()),
                 ("limit".to_string(), limit_arg(args, 50).to_string()),
             ];
             push_optional(args, &mut params, "cursor");
             let data = slack_api_call("conversations.replies", params).await?;
-            Ok(render_history(data, channel))
+            Ok(render_history(data, &resolved))
         }
         "slack_search_messages" => {
             let data = search_call(args, vec!["messages"]).await?;
@@ -176,6 +190,11 @@ pub async fn call_tool(name: &str, args: &Value) -> Result<String> {
             let user_id = slack_token_user_id().context("could not resolve Slack user_id")?;
             slack_post_as_me(&json!({"channel": user_id, "text": text}), &safety).await
         }
+        "slack_schedule_message" => slack_schedule_message(args, &safety).await,
+        "slack_search_channels" => slack_search_channels(args).await,
+        "slack_create_canvas" => slack_create_canvas(args, &safety).await,
+        "slack_read_canvas" => slack_read_canvas(args).await,
+        "slack_update_canvas" => slack_update_canvas(args, &safety).await,
         _ => Ok(format!("unknown tool: {name}")),
     }
 }
@@ -189,7 +208,7 @@ fn full_tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "slack_channel_history",
-            "description": "Read recent messages from a Slack channel",
+            "description": "Read recent messages from a Slack channel or DM. `channel` accepts a public/private channel ID (C…/G…), an existing DM channel ID (D…), or a user ID (U…/W…); a user ID is auto-resolved to the DM with that user via conversations.open, so you do not need to look up a D… ID first.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -247,7 +266,7 @@ fn full_tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "slack_channel_replies",
-            "description": "Read replies in a Slack thread",
+            "description": "Read replies in a Slack thread. `channel` accepts a public/private channel ID (C…/G…), an existing DM channel ID (D…), or a user ID (U…/W…); a user ID is auto-resolved to the DM with that user via conversations.open.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -311,6 +330,74 @@ fn full_tool_catalog() -> Vec<Value> {
                 "type": "object",
                 "properties": {"text": {"type": "string"}},
                 "required": ["text"]
+            }
+        }),
+        json!({
+            "name": "slack_search_channels",
+            "description": "Find Slack channels by name, topic, or purpose substring. Walks `conversations.list` and filters case-insensitively. Returns channel IDs/names/topics/purposes/archive flags. Use `channel_types` to opt into private channels (default `public_channel`).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "channel_types": {"type": "string"},
+                    "include_archived": {"type": "boolean"},
+                    "limit": {"type": "integer"},
+                    "max_pages": {"type": "integer"},
+                    "cursor": {"type": "string"}
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
+            "name": "slack_schedule_message",
+            "description": "Schedule a future Slack message via chat.scheduleMessage as the authenticated user. `channel` accepts C…/G…/D… or U…/W… (auto-resolved to a DM). `post_at` is a Unix timestamp; Slack requires at least ~2 minutes in the future and at most 120 days. Honors channels.slack.userTokenReadOnly and channels.slack.writeAllow.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "text": {"type": "string"},
+                    "post_at": {"type": "integer"},
+                    "thread_ts": {"type": "string"},
+                    "reply_broadcast": {"type": "boolean"}
+                },
+                "required": ["channel", "text", "post_at"]
+            }
+        }),
+        json!({
+            "name": "slack_create_canvas",
+            "description": "Create a standalone Slack Canvas with the given title and Canvas-flavored Markdown content via canvases.create. Returns the canvas_id and its permalink (looked up via files.info). Requires `canvases:write` user scope and channels.slack.userTokenReadOnly = false.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["title", "content"]
+            }
+        }),
+        json!({
+            "name": "slack_read_canvas",
+            "description": "Read a Slack Canvas: returns the section_id mapping (header IDs you can target in slack_update_canvas) plus the canvas's title and permalink from files.info. Requires `canvases:read`. The full markdown body is returned when Slack's files.info response carries it; otherwise only the section IDs and metadata are surfaced (open the permalink to read the body).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "canvas_id": {"type": "string"}
+                },
+                "required": ["canvas_id"]
+            }
+        }),
+        json!({
+            "name": "slack_update_canvas",
+            "description": "Edit a Slack Canvas via canvases.edit. `action` is `append` (insert_at_end), `prepend` (insert_at_start), or `replace`. ⚠️ `replace` without `section_id` overwrites the entire canvas — call slack_read_canvas first and pass a `section_id` to scope the edit. Requires `canvases:write` and channels.slack.userTokenReadOnly = false.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "canvas_id": {"type": "string"},
+                    "action": {"type": "string"},
+                    "content": {"type": "string"},
+                    "section_id": {"type": "string"}
+                },
+                "required": ["canvas_id", "action", "content"]
             }
         }),
     ]
@@ -467,6 +554,348 @@ async fn slack_post_as_me(args: &Value, safety: &SlackSafety) -> Result<String> 
     }))?)
 }
 
+/// Schedule a message via `chat.scheduleMessage` as the authenticated
+/// user. Mirrors `slack_post_as_me`'s safety story (read-only off,
+/// `write_allow` enforced, `U…`/`W…` channel auto-resolved) so the
+/// agent's "send now" and "send later" paths share the same blast
+/// radius. Slack rejects `post_at` < ~2 min in the future and > 120
+/// days; we let Slack be the source of truth for those bounds rather
+/// than re-deriving them locally.
+async fn slack_schedule_message(args: &Value, safety: &SlackSafety) -> Result<String> {
+    let raw_channel = required_str(args, "channel")?;
+    let text = required_str(args, "text")?;
+    if text.trim().is_empty() {
+        return Ok(serde_json::to_string(
+            &json!({"ok": false, "error": "empty_text"}),
+        )?);
+    }
+    let post_at = args
+        .get("post_at")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow::anyhow!("post_at is required (Unix timestamp seconds)"))?;
+    let resolved = match resolve_channel_or_open_dm(raw_channel).await? {
+        ChannelResolution::Direct(id) => id,
+        ChannelResolution::OpenError(err) => return Ok(serde_json::to_string(&err)?),
+    };
+    if !safety.write_allowed_to(&resolved) {
+        return Ok(serde_json::to_string(&json!({
+            "ok": false,
+            "error": "channel_not_in_write_allow",
+            "channel": resolved,
+            "hint": "Add this Slack channel/user ID to channels.slack.writeAllow in ~/.zunel/config.json (or empty the list to remove the scope restriction).",
+            "write_allow": safety.write_allow.clone()
+        }))?);
+    }
+    let mut params = vec![
+        ("channel".to_string(), resolved.clone()),
+        ("text".to_string(), text.to_string()),
+        ("post_at".to_string(), post_at.to_string()),
+    ];
+    push_optional(args, &mut params, "thread_ts");
+    if args
+        .get("reply_broadcast")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        params.push(("reply_broadcast".to_string(), "true".to_string()));
+    }
+    let data = slack_api_call("chat.scheduleMessage", params).await?;
+    if data.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(serde_json::to_string(&data)?);
+    }
+    Ok(serde_json::to_string(&json!({
+        "ok": true,
+        "channel": data.get("channel").cloned().unwrap_or(json!(resolved)),
+        "scheduled_message_id": data.get("scheduled_message_id").cloned().unwrap_or(Value::Null),
+        "post_at": data.get("post_at").cloned().unwrap_or(json!(post_at)),
+    }))?)
+}
+
+/// Find Slack channels by case-insensitive substring match against
+/// `name`, `topic.value`, or `purpose.value`. Slack's
+/// `conversations.list` has no server-side filter, so this iterates
+/// pages with a hard `max_pages` cap (default 5 = up to 1000 channels)
+/// and stops once `limit` matches are collected. Workspaces with tens
+/// of thousands of channels can still miss matches that fall beyond
+/// the cap; the response carries `next_cursor` and `pages_scanned` so
+/// the agent can keep paging if it has to.
+async fn slack_search_channels(args: &Value) -> Result<String> {
+    let query = required_str(args, "query")?.to_lowercase();
+    let types = args
+        .get("channel_types")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("public_channel");
+    let exclude_archived = !args
+        .get("include_archived")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let limit = limit_arg(args, 20).max(1);
+    let max_pages = args
+        .get("max_pages")
+        .and_then(Value::as_u64)
+        .unwrap_or(5)
+        .clamp(1, 20);
+    let mut cursor = args
+        .get("cursor")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut matches: Vec<Value> = Vec::new();
+    let mut pages_scanned: u64 = 0;
+    while pages_scanned < max_pages && (matches.len() as u64) < limit {
+        let mut params = vec![
+            ("types".to_string(), types.to_string()),
+            (
+                "exclude_archived".to_string(),
+                if exclude_archived { "true" } else { "false" }.to_string(),
+            ),
+            ("limit".to_string(), "200".to_string()),
+        ];
+        if !cursor.is_empty() {
+            params.push(("cursor".to_string(), cursor.clone()));
+        }
+        let data = slack_api_call("conversations.list", params).await?;
+        if data.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Ok(serde_json::to_string(&data)?);
+        }
+        if let Some(channels) = data.get("channels").and_then(Value::as_array) {
+            for channel in channels {
+                if (matches.len() as u64) >= limit {
+                    break;
+                }
+                if channel_matches_query(channel, &query) {
+                    matches.push(compact_channel_summary(channel));
+                }
+            }
+        }
+        pages_scanned += 1;
+        cursor = data
+            .pointer("/response_metadata/next_cursor")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if cursor.is_empty() {
+            break;
+        }
+    }
+    Ok(serde_json::to_string(&json!({
+        "ok": true,
+        "channels": matches,
+        "pages_scanned": pages_scanned,
+        "next_cursor": if cursor.is_empty() { Value::Null } else { json!(cursor) },
+    }))?)
+}
+
+fn channel_matches_query(channel: &Value, query_lower: &str) -> bool {
+    if query_lower.is_empty() {
+        return true;
+    }
+    let name = channel
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    let topic = channel
+        .pointer("/topic/value")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    let purpose = channel
+        .pointer("/purpose/value")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    name.contains(query_lower) || topic.contains(query_lower) || purpose.contains(query_lower)
+}
+
+fn compact_channel_summary(channel: &Value) -> Value {
+    json!({
+        "id": channel.get("id").cloned().unwrap_or(Value::Null),
+        "name": channel.get("name").cloned().unwrap_or(Value::Null),
+        "is_private": channel.get("is_private").cloned().unwrap_or(json!(false)),
+        "is_archived": channel.get("is_archived").cloned().unwrap_or(json!(false)),
+        "is_member": channel.get("is_member").cloned().unwrap_or(Value::Null),
+        "num_members": channel.get("num_members").cloned().unwrap_or(Value::Null),
+        "topic": truncate(channel.pointer("/topic/value").and_then(Value::as_str).unwrap_or("")),
+        "purpose": truncate(channel.pointer("/purpose/value").and_then(Value::as_str).unwrap_or("")),
+    })
+}
+
+/// Create a standalone Canvas via `canvases.create`. Slack's
+/// `canvases.create` requires the `canvases:write` user scope; the
+/// agent's user-token MCP install must include that scope (see
+/// docs/configuration.md). After creation we follow up with
+/// `files.info` to enrich the response with a permalink so the agent
+/// can hand the URL back to the human.
+async fn slack_create_canvas(args: &Value, safety: &SlackSafety) -> Result<String> {
+    if safety.read_only {
+        return Ok(serde_json::to_string(&json!({
+            "ok": false,
+            "error": "user_token_read_only",
+            "hint": "Set channels.slack.userTokenReadOnly = false in ~/.zunel/config.json to allow this tool to create a canvas on the user's behalf."
+        }))?);
+    }
+    let title = required_str(args, "title")?;
+    let content = required_str(args, "content")?;
+    let body = json!({
+        "title": title,
+        "document_content": {"type": "markdown", "markdown": content},
+    });
+    let data = slack_api_json_call("canvases.create", body).await?;
+    if data.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(serde_json::to_string(&data)?);
+    }
+    let canvas_id = data
+        .get("canvas_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let permalink = canvas_permalink(&canvas_id).await;
+    Ok(serde_json::to_string(&json!({
+        "ok": true,
+        "canvas_id": canvas_id,
+        "permalink": permalink,
+    }))?)
+}
+
+/// Read a Canvas: list its sections (`canvases.sections.lookup` with
+/// `criteria: {section_types: ["any_header"]}`) and fetch metadata via
+/// `files.info`. Slack's public API does not currently surface the
+/// canvas markdown body in a single call, so we surface whatever
+/// `files.info` returns under `file.canvas` (a recent Slack addition)
+/// and otherwise hand back the section IDs + permalink so the human
+/// can open the canvas in the UI. Section IDs feed straight into
+/// `slack_update_canvas` for scoped edits.
+async fn slack_read_canvas(args: &Value) -> Result<String> {
+    let canvas_id = required_str(args, "canvas_id")?;
+    let lookup = slack_api_json_call(
+        "canvases.sections.lookup",
+        json!({
+            "canvas_id": canvas_id,
+            "criteria": {"section_types": ["any_header"]},
+        }),
+    )
+    .await?;
+    let sections = if lookup.get("ok").and_then(Value::as_bool) == Some(true) {
+        lookup.get("sections").cloned().unwrap_or_else(|| json!([]))
+    } else {
+        json!({"error": lookup.get("error").cloned().unwrap_or(Value::Null)})
+    };
+    let info = slack_api_call(
+        "files.info",
+        vec![("file".to_string(), canvas_id.to_string())],
+    )
+    .await?;
+    let title = info
+        .pointer("/file/title")
+        .or_else(|| info.pointer("/file/name"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let permalink = info
+        .pointer("/file/permalink")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let content = info
+        .pointer("/file/canvas/content")
+        .or_else(|| info.pointer("/file/canvas/markdown"))
+        .or_else(|| info.pointer("/file/preview"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(serde_json::to_string(&json!({
+        "ok": true,
+        "canvas_id": canvas_id,
+        "title": title,
+        "permalink": permalink,
+        "sections": sections,
+        "content": content,
+    }))?)
+}
+
+/// Edit a Canvas via `canvases.edit`. Maps the Cursor-plugin-friendly
+/// `action` vocabulary (`append`/`prepend`/`replace`) onto Slack's
+/// underlying `operation` names (`insert_at_end` / `insert_at_start`
+/// / `replace`) so the agent doesn't have to memorise both. A
+/// `replace` without `section_id` overwrites the entire canvas — we
+/// surface that explicitly in the tool description; we do not refuse
+/// it locally because the human sometimes legitimately wants a clean
+/// rewrite.
+async fn slack_update_canvas(args: &Value, safety: &SlackSafety) -> Result<String> {
+    if safety.read_only {
+        return Ok(serde_json::to_string(&json!({
+            "ok": false,
+            "error": "user_token_read_only",
+            "hint": "Set channels.slack.userTokenReadOnly = false in ~/.zunel/config.json to allow this tool to edit a canvas on the user's behalf."
+        }))?);
+    }
+    let canvas_id = required_str(args, "canvas_id")?;
+    let action = required_str(args, "action")?;
+    let content = required_str(args, "content")?;
+    let operation = match action {
+        "append" => "insert_at_end",
+        "prepend" => "insert_at_start",
+        "replace" => "replace",
+        other => {
+            return Ok(serde_json::to_string(&json!({
+                "ok": false,
+                "error": "invalid_action",
+                "action": other,
+                "allowed": ["append", "prepend", "replace"],
+            }))?);
+        }
+    };
+    let mut change = serde_json::Map::new();
+    change.insert("operation".into(), json!(operation));
+    change.insert(
+        "document_content".into(),
+        json!({"type": "markdown", "markdown": content}),
+    );
+    if let Some(section_id) = args
+        .get("section_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        change.insert("section_id".into(), json!(section_id));
+    }
+    let body = json!({
+        "canvas_id": canvas_id,
+        "changes": [Value::Object(change)],
+    });
+    let data = slack_api_json_call("canvases.edit", body).await?;
+    if data.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(serde_json::to_string(&data)?);
+    }
+    let permalink = canvas_permalink(canvas_id).await;
+    Ok(serde_json::to_string(&json!({
+        "ok": true,
+        "canvas_id": canvas_id,
+        "action": action,
+        "permalink": permalink,
+    }))?)
+}
+
+/// Best-effort `files.info` lookup for a canvas permalink. Returns
+/// `Value::Null` (not an `Err`) on any failure so the create/edit
+/// happy path still succeeds and the agent can fall back to opening
+/// the canvas via Slack's UI search.
+async fn canvas_permalink(canvas_id: &str) -> Value {
+    if canvas_id.is_empty() {
+        return Value::Null;
+    }
+    match slack_api_call(
+        "files.info",
+        vec![("file".to_string(), canvas_id.to_string())],
+    )
+    .await
+    {
+        Ok(data) => data
+            .pointer("/file/permalink")
+            .cloned()
+            .unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    }
+}
+
 async fn search_call(args: &Value, content_types: Vec<&str>) -> Result<Value> {
     let mut payload = serde_json::Map::new();
     payload.insert("query".into(), json!(required_str(args, "query")?));
@@ -523,6 +952,59 @@ fn slack_whoami() -> String {
         "slack token configured".into()
     } else {
         "slack token missing".into()
+    }
+}
+
+/// Outcome of [`resolve_channel_or_open_dm`].
+///
+/// `Direct` carries the channel ID the caller should pass to
+/// `conversations.history` / `conversations.replies` — either the input
+/// unchanged (for `C…`/`G…`/`D…` IDs) or the freshly opened `D…` DM that
+/// `conversations.open` returned for a `U…`/`W…` user ID. `OpenError`
+/// carries a Slack-shaped `{ok:false, error:…}` payload from a failed
+/// open call so the dispatcher can render it verbatim instead of the
+/// agent getting a confusing `channel_not_found` two layers down.
+enum ChannelResolution {
+    Direct(String),
+    OpenError(Value),
+}
+
+/// If `channel` looks like a Slack user ID (`U…` or `W…`), open the
+/// corresponding DM via `conversations.open` and return that channel's
+/// `D…` ID. Otherwise pass the value through unchanged.
+///
+/// This gives `slack_channel_history` and `slack_channel_replies`
+/// parity with `chat.postMessage` (which already accepts a user ID as
+/// `channel`) and with the Cursor Slack plugin's read-history surface,
+/// so the agent can read "DM with user U…" without first having to
+/// dredge up a `D…` ID by hand. The helper does no other validation —
+/// any other prefix (`C…`/`G…`/`D…`/etc.) is forwarded to Slack as-is
+/// and Slack's own `channel_not_found` is the source of truth for "this
+/// is not a real channel."
+async fn resolve_channel_or_open_dm(channel: &str) -> Result<ChannelResolution> {
+    let looks_like_user_id = channel.starts_with('U') || channel.starts_with('W');
+    if !looks_like_user_id {
+        return Ok(ChannelResolution::Direct(channel.to_string()));
+    }
+    let data = slack_api_call(
+        "conversations.open",
+        vec![("users".to_string(), channel.to_string())],
+    )
+    .await?;
+    if data.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(ChannelResolution::OpenError(data));
+    }
+    match data
+        .pointer("/channel/id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => Ok(ChannelResolution::Direct(id.to_string())),
+        None => Ok(ChannelResolution::OpenError(json!({
+            "ok": false,
+            "error": "conversations_open_returned_no_channel_id",
+            "user": channel,
+        }))),
     }
 }
 
@@ -1092,9 +1574,16 @@ mod tests {
     }
 
     #[test]
-    fn full_catalog_lists_eleven_tools() {
+    fn full_catalog_lists_every_tool_in_parity_with_cursor_plugin() {
+        // The cursor `plugin-slack` MCP exposes a 13-tool surface; zunel
+        // matches every read tool plus the `_as_me` write variants and
+        // adds `slack_dm_self` on top. Pin the live catalog to the
+        // intended size so a tool deletion (or accidental duplicate)
+        // gets flagged before it ships, and assert each parity name is
+        // present so a rename in catalog-only space (without updating
+        // the dispatcher) also fails fast.
         let tools = full_tool_catalog();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 16);
         let names: Vec<&str> = tools
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
@@ -1105,12 +1594,17 @@ mod tests {
             "slack_search_messages",
             "slack_search_users",
             "slack_search_files",
+            "slack_search_channels",
             "slack_channel_replies",
             "slack_list_users",
             "slack_user_info",
             "slack_permalink",
             "slack_post_as_me",
             "slack_dm_self",
+            "slack_schedule_message",
+            "slack_create_canvas",
+            "slack_read_canvas",
+            "slack_update_canvas",
         ] {
             assert!(
                 names.contains(expected),

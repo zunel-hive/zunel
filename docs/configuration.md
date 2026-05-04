@@ -1103,12 +1103,14 @@ also vend user tokens. Set up a second app at `~/.zunel/slack-app-mcp/`:
          "user": [
            "channels:history", "groups:history",
            "im:history",       "mpim:history",
+           "channels:read",    "groups:read",
            "search:read.im",   "search:read.mpim",
            "search:read.private", "search:read.public",
            "search:read.users",   "search:read.files",
            "users:read",       "users:read.email",
            "chat:write",       "im:write",
-           "files:write"
+           "files:write",
+           "canvases:read",    "canvases:write"
          ],
          "user_optional": ["search:read.files"]
        }
@@ -1132,17 +1134,25 @@ also vend user tokens. Set up a second app at `~/.zunel/slack-app-mcp/`:
    coarse `search:read` is typically blocked by the Permissions Policy
    while the granular variants are allowed.
 
-   Why request `chat:write` / `im:write` / `files:write` here even on a
-   "read-mostly" install? They're the scopes the runtime write tools
-   (`slack_post_as_me`, `slack_dm_self`) and the `zunel slack post` CLI
-   need on the Slack side. Whether they actually fire is gated at
-   runtime by `channels.slack.userTokenReadOnly` (hard off-switch) and
+   Why request `chat:write` / `im:write` / `files:write` /
+   `canvases:write` here even on a "read-mostly" install? They're the
+   scopes the runtime write tools (`slack_post_as_me`, `slack_dm_self`,
+   `slack_schedule_message`, `slack_create_canvas`,
+   `slack_update_canvas`) and the `zunel slack post` CLI need on the
+   Slack side. Whether they actually fire is gated at runtime by
+   `channels.slack.userTokenReadOnly` (hard off-switch) and
    `channels.slack.writeAllow` (per-target allowlist), so requesting
    them here keeps `zunel slack login --force` idempotent — you don't
    end up with a token that can't post the day you flip the safety
    knobs. If you want a token whose Slack-side capability is read-only
-   by construction, drop these three scopes from the manifest **and**
-   pass `--scopes <read-only list>` to `zunel slack login`.
+   by construction, drop these scopes from the manifest **and** pass
+   `--scopes <read-only list>` to `zunel slack login`.
+
+   `channels:read` / `groups:read` back `slack_search_channels`
+   (paginated `conversations.list`); `canvases:read` backs
+   `slack_read_canvas` (`canvases.sections.lookup` + `files.info`).
+   Both are read-only scopes and stay enabled even when
+   `userTokenReadOnly = true`.
 
 2. **Mint the user token:**
 
@@ -1343,16 +1353,37 @@ also vend user tokens. Set up a second app at `~/.zunel/slack-app-mcp/`:
    `mcp_slack_me_search_messages`, `mcp_slack_me_post_as_me`,
    `mcp_slack_me_dm_self`, etc.
 
-**Read tools** (always exposed): `slack_whoami`, `slack_channel_history`,
-`slack_channel_replies`, `slack_search_messages`, `slack_search_users`,
-`slack_search_files`, `slack_list_users`, `slack_user_info`,
-`slack_permalink`.
+**Read tools** (always exposed): `slack_whoami`, `slack_channel_history`
+(also accepts a `U…`/`W…` user ID and auto-opens the DM via
+`conversations.open`), `slack_channel_replies` (same auto-resolution),
+`slack_search_messages`, `slack_search_users`, `slack_search_files`,
+`slack_search_channels` (paginated `conversations.list` with
+case-insensitive substring filter on name/topic/purpose),
+`slack_list_users`, `slack_user_info`, `slack_permalink`,
+`slack_read_canvas` (returns section IDs for targeted edits plus
+`files.info` metadata).
 
 **Write tools** (gated by `channels.slack.userTokenReadOnly` and
 `channels.slack.writeAllow`): `slack_post_as_me` (post `chat.postMessage`
 to any channel/DM as you), `slack_dm_self` (DM yourself, useful for
-reminders). Both go out under your **user** OAuth token, so they appear
-in the Slack audit log as typing-from-you events.
+reminders), `slack_schedule_message` (`chat.scheduleMessage`; auto-DM
+resolution applies and `writeAllow` is enforced against the resolved
+channel ID, not the raw user ID), `slack_create_canvas` and
+`slack_update_canvas` (`canvases.create` / `canvases.edit`; the
+update-tool maps `append`/`prepend`/`replace` to Slack's
+`insert_at_end`/`insert_at_start`/`replace`). All go out under your
+**user** OAuth token, so they appear in the Slack audit log as
+typing-from-you events.
+
+The Slack-app manifest in this section already requests every scope
+the live tool surface needs: `chat:write` / `im:write` / `files:write`
+back the `chat.postMessage` / `chat.scheduleMessage` / file-attach
+paths, `canvases:read` / `canvases:write` back the canvas trio, and
+`channels:read` / `groups:read` back `slack_search_channels`. If you
+installed Zunel before this scope set was added, run
+`zunel slack login --force` to re-mint the user token against the
+updated manifest; otherwise Slack returns `missing_scope` on the
+canvas / channel-search calls.
 
 Two layered safety knobs, in priority order:
 
