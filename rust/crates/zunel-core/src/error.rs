@@ -24,6 +24,9 @@ pub enum Error {
     #[error("bus error: {0}")]
     Bus(#[from] zunel_bus::BusError),
 
+    #[error("agent loop cancelled mid-turn")]
+    Cancelled,
+
     #[error("{0}")]
     Other(String),
 }

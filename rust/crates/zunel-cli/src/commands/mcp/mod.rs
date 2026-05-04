@@ -20,6 +20,9 @@ use anyhow::Result;
 use crate::cli::{McpArgs, McpCommand};
 
 mod agent;
+mod approval_queue;
+mod cancel_registry;
+mod helper_approval_tools;
 mod helper_ask;
 mod oauth;
 mod registry_dispatcher;

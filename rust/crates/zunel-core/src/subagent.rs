@@ -204,6 +204,7 @@ async fn run_child(
                 approval_scope: ApprovalScope::All,
                 hook: None,
                 trim_budgets: Default::default(),
+                cancel: tokio_util::sync::CancellationToken::new(),
             },
             tx,
         )

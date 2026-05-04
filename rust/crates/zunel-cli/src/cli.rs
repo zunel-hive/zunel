@@ -223,14 +223,30 @@ pub struct McpAgentArgs {
     /// moment any tool requires approval — there is no human in the
     /// loop on the helper side. `allow_all` auto-approves every
     /// gated call; only sensible for fully read-only helpers run by
-    /// trusted operators.
+    /// trusted operators. `forward` enqueues the request on a
+    /// shared queue and exposes `helper_pending_approvals` /
+    /// `helper_approve` so the hub can resolve it via additional
+    /// MCP calls (polling-based — the spec doesn't define
+    /// bidirectional state transfer).
     #[arg(
         long = "mode2-approval",
         default_value = "reject",
-        value_parser = ["reject", "allow_all"],
+        value_parser = ["reject", "allow_all", "forward"],
         requires = "mode2"
     )]
     pub mode2_approval: String,
+
+    /// Per-approval wallclock ceiling (in seconds) for
+    /// `--mode2-approval forward`. After this duration with no
+    /// matching `helper_approve` decision the queued request flips
+    /// to "deny" so the helper's tool loop unblocks. Defaults to
+    /// 300s. Ignored under any other approval policy.
+    #[arg(
+        long = "mode2-approval-timeout-secs",
+        default_value_t = 300u64,
+        requires = "mode2"
+    )]
+    pub mode2_approval_timeout_secs: u64,
 
     /// Hard upper bound on iterations a single `helper_ask` call
     /// can spend in the helper's tool-call loop. The caller's
@@ -238,6 +254,23 @@ pub struct McpAgentArgs {
     /// to the helper's own `agents.defaults.max_tool_iterations`.
     #[arg(long = "mode2-max-iterations", requires = "mode2")]
     pub mode2_max_iterations: Option<usize>,
+
+    /// Drop any `system_prompt` arg passed to `helper_ask`. The
+    /// helper still answers the call but runs with no operator
+    /// persona override; `_meta.system_prompt = "ignored"` tells
+    /// the hub why its prompt didn't take. Use this when the
+    /// helper's persona must be fixed by the operator running
+    /// `zunel mcp agent` (compliance, fleet roll-out).
+    #[arg(long = "mode2-disable-system-prompt", requires = "mode2")]
+    pub mode2_disable_system_prompt: bool,
+
+    /// Wallclock ceiling (in seconds) for a single `helper_ask`
+    /// call. On expiry the helper's loop is cancelled and the
+    /// caller sees a structured error. Defaults to no timeout —
+    /// the call runs until the helper finishes, the hub cancels,
+    /// or the underlying provider errors out.
+    #[arg(long = "mode2-call-timeout-secs", requires = "mode2")]
+    pub mode2_call_timeout_secs: Option<u64>,
 
     /// Print a paste-ready `tools.mcpServers.<name>` snippet for this
     /// profile to stdout and exit without binding the socket. The

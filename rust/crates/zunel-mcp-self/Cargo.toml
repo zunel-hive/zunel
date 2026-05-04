@@ -40,6 +40,7 @@ tokio-util.workspace = true
 zunel-config.workspace = true
 zunel-mcp.workspace = true
 zunel-mcp-slack.workspace = true
+zunel-tools.workspace = true
 
 [features]
 default = []

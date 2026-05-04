@@ -4735,6 +4735,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "async-stream",
  "async-trait",
  "base64",
  "chrono",
@@ -4818,6 +4819,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "wiremock",
  "zip",
@@ -4901,6 +4903,7 @@ dependencies = [
  "zunel-config",
  "zunel-mcp",
  "zunel-mcp-slack",
+ "zunel-tools",
 ]
 
 [[package]]

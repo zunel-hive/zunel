@@ -24,4 +24,4 @@ pub use web_search_providers::{
 
 pub use error::{Error, Result};
 pub use registry::ToolRegistry;
-pub use tool::{DynTool, Tool, ToolContext, ToolResult};
+pub use tool::{DynTool, RpcId, Tool, ToolContext, ToolResult};

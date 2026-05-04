@@ -114,6 +114,7 @@ pub(super) async fn run(args: McpAgentArgs, config_path: Option<&Path>) -> Resul
     }
 
     let mut registry = build_filtered_registry(&cfg, &workspace, &args).await;
+    let mut cancel_registry: Option<Arc<super::cancel_registry::CancelRegistry>> = None;
     if args.mode2 {
         let approval_policy = HelperApprovalPolicy::from_cli_str(&args.mode2_approval)
             .map_err(|err| anyhow::anyhow!("invalid --mode2-approval value: {err}"))?;
@@ -127,7 +128,34 @@ pub(super) async fn run(args: McpAgentArgs, config_path: Option<&Path>) -> Resul
             .await
             .context("building provider for Mode 2")?;
         let sessions = Arc::new(SessionManager::new(&workspace));
-        registry.register(Arc::new(HelperAskTool::new(
+        // Shared cancel registry: helper_ask registers entries, the
+        // dispatcher routes notifications/cancelled to the same
+        // store. Both halves point at the same Arc so a single
+        // cancel hits the right token.
+        let registry_arc = super::cancel_registry::CancelRegistry::new();
+        let call_timeout = args
+            .mode2_call_timeout_secs
+            .map(std::time::Duration::from_secs);
+
+        // Approval-forwarding wiring. Build the queue and the
+        // poll/resolve tools only when the operator opted in via
+        // `--mode2-approval forward`; under reject/allow_all they
+        // stay absent from the registry so the helper's surface
+        // doesn't grow.
+        let approval_queue = if matches!(approval_policy, HelperApprovalPolicy::Forward) {
+            let queue = super::approval_queue::ApprovalQueue::new();
+            registry.register(Arc::new(
+                super::helper_approval_tools::HelperPendingApprovalsTool::new(Arc::clone(&queue)),
+            ));
+            registry.register(Arc::new(
+                super::helper_approval_tools::HelperApproveTool::new(Arc::clone(&queue)),
+            ));
+            Some(queue)
+        } else {
+            None
+        };
+
+        let mut helper_ask = HelperAskTool::new(
             provider,
             cfg.agents.defaults.clone(),
             sessions,
@@ -135,7 +163,18 @@ pub(super) async fn run(args: McpAgentArgs, config_path: Option<&Path>) -> Resul
             workspace.clone(),
             approval_policy,
             args.mode2_max_iterations,
-        )));
+        )
+        .with_system_prompt_disabled(args.mode2_disable_system_prompt)
+        .with_cancel_registry(Arc::clone(&registry_arc))
+        .with_call_timeout(call_timeout)
+        .with_approval_timeout(std::time::Duration::from_secs(
+            args.mode2_approval_timeout_secs,
+        ));
+        if let Some(queue) = approval_queue {
+            helper_ask = helper_ask.with_approval_queue(queue);
+        }
+        registry.register(Arc::new(helper_ask));
+        cancel_registry = Some(registry_arc);
     }
     let identity = DispatcherIdentity {
         server_name: format!("zunel-agent:{profile}"),
@@ -143,7 +182,10 @@ pub(super) async fn run(args: McpAgentArgs, config_path: Option<&Path>) -> Resul
     };
     let session_key = format!("mcp-agent:{profile}");
     let context = ToolContext::new_with_workspace(workspace.clone(), session_key);
-    let dispatcher = RegistryDispatcher::new(identity, registry, context);
+    let mut dispatcher = RegistryDispatcher::new(identity, registry, context);
+    if let Some(reg) = cancel_registry {
+        dispatcher = dispatcher.with_cancel_registry(reg);
+    }
 
     eprintln!(
         "zunel mcp agent: serving {} tool(s) for profile {profile} (workspace: {})",
