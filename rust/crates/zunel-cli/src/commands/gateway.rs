@@ -19,6 +19,10 @@ use zunel_core::{
     reconnect_unhealthy_mcp_servers, AgentLoop, ApprovalScope, ReloadReport,
     RuntimeSelfStateProvider, SessionManager, SharedToolRegistry, SubagentManager,
 };
+use zunel_providers::codex_refresh::{
+    refresh_if_near_expiry as refresh_codex_if_near_expiry, RefreshContext as CodexRefreshContext,
+    RefreshError as CodexRefreshError, RefreshOutcome as CodexRefreshOutcome,
+};
 use zunel_tools::{self_tool::SelfTool, spawn::SpawnTool};
 
 use crate::cli::GatewayArgs;
@@ -58,6 +62,20 @@ const MCP_RECONNECT_DEFAULT_TICK_SECS: u64 = 300;
 /// negligible.
 const AWS_REFRESH_DEFAULT_TICK_SECS: u64 = 600;
 const AWS_REFRESH_DEFAULT_WINDOW_SECS: i64 = 900;
+
+/// Wake up every 30 minutes to check whether the cached ChatGPT-Codex
+/// access_token in `~/.codex/auth.json` is within 1 hour of expiring
+/// and exchange it via `grant_type=refresh_token` if so. Tunable via
+/// `ZUNEL_CODEX_REFRESH_TICK_SECS` / `ZUNEL_CODEX_REFRESH_WINDOW_SECS`;
+/// set `ZUNEL_CODEX_REFRESH_DISABLED=1` to opt out entirely.
+///
+/// The default tick (30 min) and window (1 hour) sit comfortably
+/// inside the codex CLI's hard 10-day access_token lifetime: a stale
+/// token is replaced ~6 ticks before any agent reaches for it, while
+/// the per-tick cost (one `auth.openai.com` round-trip when the token
+/// is comfortably fresh, zero filesystem writes) stays negligible.
+const CODEX_REFRESH_DEFAULT_TICK_SECS: u64 = 1800;
+const CODEX_REFRESH_DEFAULT_WINDOW_SECS: i64 = 3600;
 
 pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
     let cfg = zunel_config::load_config(config_path).with_context(|| "loading zunel config")?;
@@ -156,6 +174,7 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
     let mcp_refresh_task = spawn_mcp_refresh_task(config_path);
     let mcp_reconnect_task = spawn_mcp_reconnect_task(agent_loop.tools_handle(), config_path);
     let aws_refresh_task = spawn_aws_refresh_task(config_path);
+    let codex_refresh_task = spawn_codex_refresh_task(config_path);
 
     tokio::signal::ctrl_c()
         .await
@@ -179,6 +198,9 @@ pub async fn run(args: GatewayArgs, config_path: Option<&Path>) -> Result<()> {
         handle.abort();
     }
     if let Some(handle) = aws_refresh_task {
+        handle.abort();
+    }
+    if let Some(handle) = codex_refresh_task {
         handle.abort();
     }
     Ok(())
@@ -744,6 +766,166 @@ async fn aws_refresh_loop(profiles: Vec<String>, tick_secs: u64, window_secs: i6
     }
 }
 
+/// Periodic in-runtime ChatGPT-Codex access_token refresh.
+///
+/// Sibling of [`spawn_bot_refresh_task`] / [`spawn_mcp_refresh_task`] /
+/// [`spawn_aws_refresh_task`]: every `ZUNEL_CODEX_REFRESH_TICK_SECS`
+/// seconds (default 30 min) the task wakes up, decodes the cached
+/// access_token's `exp` claim out of `~/.codex/auth.json`, and — if it
+/// sits within `ZUNEL_CODEX_REFRESH_WINDOW_SECS` (default 1 hour) of
+/// expiring — POSTs the refresh_token to `auth.openai.com/oauth/token`
+/// and atomically rewrites `auth.json` in place. The next call from
+/// the agent loop reads the rotated token cold off disk and proceeds
+/// without a 401.
+///
+/// Why this exists: the `codex` CLI itself only refreshes when *some
+/// process invokes it*. There is no codex daemon, so a long-running
+/// `brew services start zunel` gateway that hasn't shelled out to
+/// `codex` in 10 days will silently start failing every Slack inbound
+/// with `HTTP 401: Codex credentials were rejected` until the operator
+/// re-runs `codex login`. With this task in place, the loop pre-empts
+/// that drift even if the operator never touches the codex CLI again.
+///
+/// Returns `None` when:
+/// - `ZUNEL_CODEX_REFRESH_DISABLED` is set to anything truthy (`1`,
+///   `true`, …) — operators who want full external control.
+/// - The active config has `agents.defaults.provider != "codex"` — no
+///   codex provider means there's nothing to refresh.
+/// - The config can't be loaded — surface a warn and back off so
+///   gateway startup keeps succeeding.
+///
+/// Failures inside the loop are logged at WARN and never crash the
+/// gateway. `RefreshTokenRejected` (the IdP said the refresh_token
+/// itself is dead — expired/reused/revoked) gets a stable, operator-
+/// actionable log line pointing at `codex login`; transient failures
+/// (network, 5xx) just retry on the next tick.
+fn spawn_codex_refresh_task(config_path: Option<&Path>) -> Option<tokio::task::JoinHandle<()>> {
+    if env_disabled("ZUNEL_CODEX_REFRESH_DISABLED") {
+        tracing::info!("in-runtime Codex refresh disabled via ZUNEL_CODEX_REFRESH_DISABLED");
+        return None;
+    }
+    let cfg = match zunel_config::load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::warn!(error = %err, "in-runtime Codex refresh disabled: cannot load config");
+            return None;
+        }
+    };
+    let provider = cfg
+        .agents
+        .defaults
+        .provider
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if provider != "codex" {
+        tracing::debug!(
+            provider,
+            "in-runtime Codex refresh inactive: agents.defaults.provider is not codex"
+        );
+        return None;
+    }
+    let codex_home = match resolve_codex_home() {
+        Some(home) => home,
+        None => {
+            tracing::warn!(
+                "in-runtime Codex refresh disabled: cannot resolve CODEX_HOME (no env var, no $HOME)"
+            );
+            return None;
+        }
+    };
+    let ctx = CodexRefreshContext::from_codex_home(&codex_home);
+    let tick_secs = parse_env_or(
+        "ZUNEL_CODEX_REFRESH_TICK_SECS",
+        CODEX_REFRESH_DEFAULT_TICK_SECS,
+    );
+    let window_secs = parse_env_or(
+        "ZUNEL_CODEX_REFRESH_WINDOW_SECS",
+        CODEX_REFRESH_DEFAULT_WINDOW_SECS as u64,
+    ) as i64;
+    Some(tokio::spawn(codex_refresh_loop(
+        ctx,
+        tick_secs,
+        window_secs,
+    )))
+}
+
+/// Mirror the codex CLI's `CODEX_HOME` resolution: explicit env var
+/// wins, otherwise `$HOME/.codex`. We intentionally don't fall back to
+/// `dirs::home_dir()` — the rest of the workspace uses raw `$HOME`,
+/// so this stays consistent.
+fn resolve_codex_home() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("CODEX_HOME") {
+        return Some(PathBuf::from(home));
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(".codex"))
+}
+
+async fn codex_refresh_loop(ctx: CodexRefreshContext, tick_secs: u64, window_secs: i64) {
+    tracing::info!(
+        path = %ctx.auth_path.display(),
+        endpoint = %ctx.refresh_endpoint,
+        tick_secs,
+        window_secs,
+        "starting in-runtime Codex access_token refresh"
+    );
+    let mut ticker = tokio::time::interval(Duration::from_secs(tick_secs));
+    // First tick fires immediately so a fresh-boot gateway warms its
+    // codex auth before any Slack inbound reaches the agent loop.
+    loop {
+        ticker.tick().await;
+        match refresh_codex_if_near_expiry(&ctx, Some(window_secs)).await {
+            Ok(outcome) => log_codex_refresh_outcome(outcome),
+            Err(err) => log_codex_refresh_error(err),
+        }
+    }
+}
+
+fn log_codex_refresh_outcome(outcome: CodexRefreshOutcome) {
+    use CodexRefreshOutcome::*;
+    match outcome {
+        NoAuthFile => tracing::debug!(
+            "Codex refresh tick: no ~/.codex/auth.json on disk yet (run `codex login` first)"
+        ),
+        NotChatgptMode => {
+            tracing::debug!("Codex refresh tick: auth.json is in API-key mode; nothing to refresh")
+        }
+        NoRefreshToken => tracing::warn!(
+            "Codex refresh tick: auth.json has no refresh_token; user must run `codex login`"
+        ),
+        UnknownExpiry => tracing::debug!(
+            "Codex refresh tick: cached access_token has no decodable exp; skipping"
+        ),
+        Skipped { secs_until_exp, .. } => tracing::debug!(
+            secs_until_exp,
+            "Codex access_token still fresh; skipping refresh"
+        ),
+        Refreshed {
+            secs_until_exp,
+            expires_at,
+        } => tracing::info!(
+            secs_until_exp = ?secs_until_exp,
+            expires_at = ?expires_at,
+            "refreshed Codex access_token via in-runtime task"
+        ),
+    }
+}
+
+fn log_codex_refresh_error(err: CodexRefreshError) {
+    match err {
+        CodexRefreshError::RefreshTokenRejected { reason, detail } => tracing::warn!(
+            reason = %reason,
+            detail = %detail,
+            "Codex refresh rejected by IdP; user must re-run `codex login` (loop will self-heal next tick)"
+        ),
+        other => tracing::warn!(
+            error = %other,
+            "Codex refresh tick failed; will retry on next tick"
+        ),
+    }
+}
+
 fn env_disabled(key: &str) -> bool {
     matches!(
         std::env::var(key).ok().as_deref(),
@@ -927,6 +1109,24 @@ region = us-east-1
         // Expected: explicit `assumed-role` + discovered {dev, prod}
         // − excluded {prod} = {assumed-role, dev}, sorted.
         assert_eq!(got, vec!["assumed-role".to_string(), "dev".to_string()]);
+    }
+
+    #[test]
+    fn resolve_codex_home_prefers_env_var_over_home_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let prior_codex = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", dir.path());
+        let got = resolve_codex_home();
+        match prior_codex {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        assert_eq!(got, Some(dir.path().to_path_buf()));
+        // The HOME fallback path is intentionally not exercised here:
+        // mutating $HOME is process-global and would race with other
+        // tests in this binary that read it through `zunel_config::
+        // zunel_home()`. The fallback branch is one line; visual review
+        // covers it.
     }
 
     #[test]

@@ -16,5 +16,6 @@ tokio = { workspace = true, features = ["macros", "process", "rt", "rt-multi-thr
 tracing.workspace = true
 
 [dev-dependencies]
+serial_test.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "time"] }

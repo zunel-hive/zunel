@@ -547,6 +547,55 @@ The loop is a no-op when the resolved set is empty (no explicit
 profiles, no discovered profiles, or auto-discovery turned off and
 `ssoProfiles` empty), so users who don't use AWS pay nothing.
 
+## ChatGPT-Codex token refresh
+
+When `agents.defaults.provider = "codex"`, the gateway uses the
+ChatGPT-Codex OAuth credentials cached in `~/.codex/auth.json` (the
+same file `codex login` writes). Codex access_tokens have a hard
+**10-day lifetime** baked into the JWT's `exp` claim; the codex CLI
+itself only refreshes them when *something invokes the CLI*, so a
+long-running gateway that hasn't shelled out to `codex` in 10 days
+silently starts failing every Slack inbound with `HTTP 401: Codex
+credentials were rejected`.
+
+To prevent that drift, `zunel gateway` spawns a periodic refresh task
+that decodes the cached access_token's `exp` claim and exchanges the
+refresh_token for a new access_token via
+`POST https://auth.openai.com/oauth/token` (the same endpoint the codex
+CLI uses, with the same `CODEX_REFRESH_TOKEN_URL_OVERRIDE` env var
+escape hatch). The on-disk `auth.json` is rewritten atomically and
+preserves any fields zunel doesn't model (`OPENAI_API_KEY`, nested
+`account_id` shapes, etc.).
+
+### Gateway env vars (operator overrides)
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `ZUNEL_CODEX_REFRESH_DISABLED` | unset | When `1` / `true` / `yes`, skips spawning the loop entirely. |
+| `ZUNEL_CODEX_REFRESH_TICK_SECS` | `1800` | Seconds between refresh checks. Default 30 min — well inside the access_token's 10-day lifetime. |
+| `ZUNEL_CODEX_REFRESH_WINDOW_SECS` | `3600` | Refresh window. When the cached access_token has more than this many seconds left, the tick is a no-op (logged at `debug`). |
+| `CODEX_HOME` | `~/.codex` | Override the codex CLI home directory. Used to locate `auth.json`. |
+| `CODEX_REFRESH_TOKEN_URL_OVERRIDE` | `https://auth.openai.com/oauth/token` | Override the Codex refresh endpoint. Used by tests and air-gapped deployments; mirrors the codex CLI. |
+
+### What the loop will and won't fix
+
+The initial `codex login` is still a one-time manual browser step. The
+loop only keeps an already-logged-in `auth.json` alive. If the
+refresh_token itself is expired/reused/revoked, the IdP returns 401
+with `error: refresh_token_expired` (or `_reused` / `_invalidated`)
+and the loop logs:
+
+```text
+WARN Codex refresh rejected by IdP; user must re-run `codex login` (loop will self-heal next tick) reason=refresh_token_expired
+```
+
+Run `codex login` in another terminal to mint a fresh `auth.json`; the
+next tick will succeed and any subsequent Slack inbound picks up the
+new token without a gateway restart.
+
+The loop is a no-op when `agents.defaults.provider != "codex"`, so
+users on Bedrock or custom OpenAI-compatible providers pay nothing.
+
 ## Session Hygiene
 
 Long-lived chat sessions (especially Slack DMs that stay open for weeks)

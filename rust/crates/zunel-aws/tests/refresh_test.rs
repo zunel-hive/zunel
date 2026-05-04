@@ -7,6 +7,19 @@
 //! we exercise the real subprocess plumbing rather than stubbing at
 //! the function boundary, so the env/argv/stderr-classification logic
 //! is covered for real.
+//!
+//! Every test that calls `write_aws_stub` is annotated with
+//! `#[serial_test::serial]` to avoid a Linux ETXTBSY ("Text file
+//! busy") race between sibling tests. cargo's test harness runs
+//! `#[tokio::test]` cases on parallel OS threads, and on Linux a
+//! `fork()` in any thread inherits every writable fd from every
+//! other thread for the brief window between fork and exec. If
+//! one thread is mid-write on its own `aws-stub.sh` while another
+//! forks, the forked child briefly holds a writable fd to the
+//! first thread's stub. Should that first thread happen to
+//! `exec()` its own stub during that window, Linux returns
+//! ETXTBSY. Serializing the fork+exec-using tests closes the
+//! window cleanly.
 
 use std::fs;
 use std::io::Write;
@@ -91,6 +104,7 @@ fn process_creds_json(secs_from_now: i64) -> String {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn refreshed_when_expiration_inside_window() {
     let dir = tempfile::tempdir().unwrap();
     let aws_bin = write_aws_stub(dir.path(), 0, &process_creds_json(600), "");
@@ -116,6 +130,7 @@ async fn refreshed_when_expiration_inside_window() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn skipped_when_expiration_outside_window() {
     let dir = tempfile::tempdir().unwrap();
     let aws_bin = write_aws_stub(dir.path(), 0, &process_creds_json(7200), "");
@@ -141,6 +156,7 @@ async fn skipped_when_expiration_outside_window() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn refreshed_when_no_window_supplied() {
     let dir = tempfile::tempdir().unwrap();
     let aws_bin = write_aws_stub(dir.path(), 0, &process_creds_json(86_400), "");
@@ -157,6 +173,7 @@ async fn refreshed_when_no_window_supplied() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn sso_session_expired_when_aws_cli_reports_expired_token() {
     let dir = tempfile::tempdir().unwrap();
     let aws_bin = write_aws_stub(
@@ -183,6 +200,7 @@ async fn sso_session_expired_when_aws_cli_reports_expired_token() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn profile_not_configured_when_aws_cli_says_profile_missing() {
     let dir = tempfile::tempdir().unwrap();
     let aws_bin = write_aws_stub(
@@ -203,6 +221,7 @@ async fn profile_not_configured_when_aws_cli_says_profile_missing() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn aws_command_failed_for_unknown_error() {
     let dir = tempfile::tempdir().unwrap();
     let aws_bin = write_aws_stub(
@@ -230,6 +249,7 @@ async fn aws_command_failed_for_unknown_error() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn parse_output_when_aws_stdout_is_not_json() {
     let dir = tempfile::tempdir().unwrap();
     let aws_bin = write_aws_stub(dir.path(), 0, "definitely not json", "");
@@ -245,6 +265,7 @@ async fn parse_output_when_aws_stdout_is_not_json() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn parse_expiration_when_aws_stdout_has_unparseable_timestamp() {
     let dir = tempfile::tempdir().unwrap();
     let stdout = r#"{

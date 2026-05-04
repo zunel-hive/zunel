@@ -242,12 +242,20 @@ Tunables (env vars on the gateway process):
 | `ZUNEL_MCP_REFRESH_DISABLED`     | unset   | Set to `1` / `true` / `yes` to skip spawning the remote-MCP refresh task entirely |
 | `ZUNEL_MCP_RECONNECT_TICK_SECS`  | `300`   | How often the MCP auto-reconnect task wakes up. For each configured MCP server with no live tools (and no `mcp_<name>_login_required` stub), tries to register it again so a server that was down at boot heals itself once it comes back online. |
 | `ZUNEL_MCP_RECONNECT_DISABLED`   | unset   | Set to `1` / `true` / `yes` to skip spawning the MCP auto-reconnect task |
+| `ZUNEL_CODEX_REFRESH_TICK_SECS`  | `1800`  | How often the ChatGPT-Codex access_token refresh task wakes up. Decodes `~/.codex/auth.json`'s cached `tokens.access_token` JWT and rotates via `auth.openai.com/oauth/token` when inside `ZUNEL_CODEX_REFRESH_WINDOW_SECS` of expiry. Only spawns when `agents.defaults.provider = "codex"`. |
+| `ZUNEL_CODEX_REFRESH_WINDOW_SECS`| `3600`  | Refresh the Codex access_token when it has fewer than this many seconds left. Default 1h; the access_token's full lifetime is 10 days, so the loop fires ~6 ticks before any agent reaches for a stale token. |
+| `ZUNEL_CODEX_REFRESH_DISABLED`   | unset   | Set to `1` / `true` / `yes` to skip spawning the Codex refresh task entirely. |
+| `CODEX_HOME`                     | `~/.codex` | Override the codex CLI home directory (mirrors the codex CLI). Used to locate `auth.json`. |
+| `CODEX_REFRESH_TOKEN_URL_OVERRIDE` | `https://auth.openai.com/oauth/token` | Override the Codex refresh endpoint (mirrors the codex CLI). Used by tests and air-gapped deployments. |
 | `ZUNEL_DISABLE_SELF_MCP`         | unset   | Set to `1` / `true` / `yes` to skip auto-registering the built-in self stdio MCP server (`zunel_self`). Use when you've manually wired a `--server self` entry of your own or want a stripped tool registry. |
 
 Users without bot rotation (no `slack-app/app_info.json` on disk) pay
 no cost — the bot-refresh task simply doesn't spawn. The MCP-refresh
 task is similarly cheap: it self-disables when no remote MCP server has
-`oauth.enabled = true` in `config.json`.
+`oauth.enabled = true` in `config.json`. The Codex-refresh task is
+similarly self-gating: it skips spawning when `agents.defaults.provider`
+is anything other than `"codex"`, and a single tick is one HTTP POST
+(no filesystem write) when the cached access_token is comfortably fresh.
 
 ### Custom LaunchAgent (advanced)
 
