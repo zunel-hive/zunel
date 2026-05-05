@@ -2,7 +2,7 @@
 //!
 //! The dispatcher is expressed behind the [`McpDispatcher`] trait and the
 //! transport layer in [`http`] runs against any implementation of that
-//! trait, so other commands (notably `zunel mcp agent --profile NAME`)
+//! trait, so other commands (notably `zunel mcp agent --instance NAME`)
 //! can reuse the same Streamable-HTTP/HTTPS transport with a different
 //! tool set.
 //!

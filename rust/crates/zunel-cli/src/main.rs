@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    apply_profile_override(cli.profile.as_deref())?;
+    apply_instance_override(cli.instance.as_deref())?;
     apply_unsafe_workspace_override(cli.i_know_what_im_doing);
     match cli.command {
         Command::Onboard(args) => commands::onboard::run(args).await?,
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
         Command::Gateway(args) => commands::gateway::run(args, cli.config.as_deref()).await?,
         Command::Status => commands::status::run(cli.config.as_deref()).await?,
         Command::Mcp(args) => commands::mcp::run(args, cli.config.as_deref()).await?,
-        Command::Profile(args) => commands::profile::run(args).await?,
+        Command::Instance(args) => commands::instance::run(args).await?,
         Command::Slack(args) => commands::slack::run(args, cli.config.as_deref()).await?,
         Command::Channels(args) => commands::channels::run(args, cli.config.as_deref()).await?,
         Command::Sessions(args) => commands::sessions::run(args, cli.config.as_deref()).await?,
@@ -78,19 +78,19 @@ fn install_default_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-fn apply_profile_override(profile: Option<&str>) -> Result<()> {
+fn apply_instance_override(instance: Option<&str>) -> Result<()> {
     if std::env::var_os("ZUNEL_HOME").is_some() {
         return Ok(());
     }
-    let Some(profile) = profile else {
+    let Some(instance) = instance else {
         return Ok(());
     };
-    match zunel_config::resolve_profile_home(profile) {
+    match zunel_config::resolve_instance_home(instance) {
         Ok(home) => {
             std::env::set_var("ZUNEL_HOME", home);
             Ok(())
         }
-        Err(err @ zunel_config::Error::InvalidProfileName(_)) => {
+        Err(err @ zunel_config::Error::InvalidInstanceName(_)) => {
             eprintln!("Error: {err}");
             std::process::exit(2);
         }

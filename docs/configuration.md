@@ -36,14 +36,14 @@ Two equivalent ways to point any `zunel` invocation at a non-default config:
 - Environment variable: `ZUNEL_CONFIG=/etc/zunel/config.json zunel …`. The
   `--config` flag wins when both are set.
 
-This is independent from `--profile` / `ZUNEL_HOME` (which switches the
+This is independent from `--instance` / `ZUNEL_HOME` (which switches the
 home directory wholesale, including sessions and OAuth tokens). Use
 `--config` / `ZUNEL_CONFIG` when you want to swap just the config file
 while keeping the rest of the home dir intact — handy for systemd
 deployments that ship `config.json` from `/etc` while the runtime data
 still lives under the service user's `$HOME`.
 
-### Profiles and `ZUNEL_HOME`
+### Instances and `ZUNEL_HOME`
 
 Every path zunel reads or writes — `config.json`, the workspace, sessions,
 Slack OAuth tokens, MCP OAuth tokens, the file cache — lives under a single
@@ -52,18 +52,18 @@ per-invocation or persistently:
 
 - **Per-command override:** `ZUNEL_HOME=/path/to/dir zunel ...` (an absolute
   path; takes priority over everything else).
-- **Profile flag:** `zunel --profile dev ...` (or `-p dev`) maps to
-  `~/.zunel/profiles/dev/`. The reserved name `default` maps to
+- **Instance flag:** `zunel --instance dev ...` (or `-i dev`) maps to
+  `~/.zunel/instances/dev/`. The reserved name `default` maps to
   `~/.zunel/`. Names containing whitespace, path separators, or `..` are
   rejected.
-- **Sticky default:** `zunel profile use dev` writes `dev` to
-  `~/.zunel/active_profile` so subsequent `zunel` invocations behave as if
-  you had passed `--profile dev`. Switch back with `zunel profile use
+- **Sticky default:** `zunel instance use dev` writes `dev` to
+  `~/.zunel/active_instance` so subsequent `zunel` invocations behave as if
+  you had passed `--instance dev`. Switch back with `zunel instance use
   default`.
 
-Use profiles to run separate dev / prod / experiment instances side by
+Use instances to run separate dev / prod / experiment installs side by
 side without their configs, sessions, or OAuth tokens colliding. See
-`docs/cli-reference.md#profiles` for the full command list.
+`docs/cli-reference.md#instances` for the full command list.
 
 ## A Minimal Working Config
 
@@ -1422,7 +1422,7 @@ install — its sessions, channels, MCP servers, and cron jobs — and post
 a message back to the user via the configured Slack bot.
 
 The server reads everything from disk, so it stays consistent with the
-active `ZUNEL_HOME` / `--profile` and works whether or not a `zunel
+active `ZUNEL_HOME` / `--instance` and works whether or not a `zunel
 gateway` process is also running.
 
 Tools exposed:

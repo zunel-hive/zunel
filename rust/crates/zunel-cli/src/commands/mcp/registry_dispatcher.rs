@@ -3,7 +3,7 @@
 //! Wraps a [`zunel_tools::ToolRegistry`] behind the
 //! [`zunel_mcp_self::McpDispatcher`] trait so the same Streamable
 //! HTTP transport that powers `zunel-mcp-self` can serve any zunel
-//! profile's tool surface. The dispatcher is intentionally stateless
+//! instance's tool surface. The dispatcher is intentionally stateless
 //! across MCP requests *except* for the shared
 //! [`zunel_tools::FileStateTracker`] inside the [`ToolContext`]: that
 //! object is cloned (it's `Arc`-backed) into the context for every
@@ -19,9 +19,9 @@ use zunel_tools::{RpcId, ToolContext, ToolRegistry};
 
 use super::cancel_registry::CancelRegistry;
 
-/// Server identity advertised on `initialize`. Includes the profile
+/// Server identity advertised on `initialize`. Includes the instance
 /// name so multi-server hosts can disambiguate when more than one
-/// profile is exposed.
+/// instance is exposed.
 pub struct DispatcherIdentity {
     pub server_name: String,
     pub server_version: String,

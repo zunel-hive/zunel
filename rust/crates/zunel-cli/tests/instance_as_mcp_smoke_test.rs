@@ -1,16 +1,16 @@
-//! Cross-profile smoke test for the profile-as-MCP-server feature.
+//! Cross-instance smoke test for the instance-as-MCP-server feature.
 //!
 //! This is the integration the design doc was actually pointing at:
-//! a "hub" profile A wires a "helper" profile B as an entry under
+//! a "hub" instance A wires a "helper" instance B as an entry under
 //! `tools.mcpServers` in its `config.json`, and B is being served by
 //! a real `zunel mcp agent` HTTP server with API-key auth. We then
 //! drive A's `build_default_registry_async` and assert that:
 //!
-//! 1. Two profiles boot side by side with isolated `ZUNEL_HOME`s.
+//! 1. Two instances boot side by side with isolated `ZUNEL_HOME`s.
 //! 2. The `${VAR}` substitution in `headers` reaches the live HTTP
 //!    request (and not as a literal string).
-//! 3. `RegistryDispatcher` serves the helper profile's *own*
-//!    workspace, distinct from A's, proving the per-profile isolation
+//! 3. `RegistryDispatcher` serves the helper instance's *own*
+//!    workspace, distinct from A's, proving the per-instance isolation
 //!    is real.
 //! 4. End-to-end tool execution through the registered
 //!    `mcp_helper_*` wrapper round-trips successfully, including the
@@ -20,7 +20,7 @@
 //! Lower-level pieces of this are covered by other tests (HTTP
 //! transport, env-var parser, registry dispatcher, depth forwarding);
 //! the value of this file is verifying that they all click together
-//! the way `profile-as-mcp.md` documents.
+//! the way `instance-as-mcp.md` documents.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -140,10 +140,10 @@ fn unique_env_name(prefix: &str) -> String {
 }
 
 #[tokio::test]
-async fn hub_profile_loads_helper_profile_as_mcp_server_and_round_trips_tool_call() {
+async fn hub_instance_loads_helper_instance_as_mcp_server_and_round_trips_tool_call() {
     // Held for the entire test: this case mutates `ZUNEL_HOME` and a
     // bearer-token env var, both of which are process-global. The
-    // sibling test `hub_profile_skips_helper_when_required_env_var_missing`
+    // sibling test `hub_instance_skips_helper_when_required_env_var_missing`
     // also mutates `ZUNEL_HOME`, so without serialization the two can
     // race inside `cargo test`'s shared process.
     let _env_guard = env_lock().lock().await;
@@ -155,10 +155,10 @@ async fn hub_profile_loads_helper_profile_as_mcp_server_and_round_trips_tool_cal
     // round-tripped read_file actually targeted *helper*'s workspace
     // rather than the hub's.
     let helper_marker = helper.workspace.join("helper-marker.txt");
-    let helper_marker_body = "served-from-helper-profile\n";
+    let helper_marker_body = "served-from-helper-instance\n";
     std::fs::write(&helper_marker, helper_marker_body).expect("write helper marker");
 
-    // Set up the hub profile.
+    // Set up the hub instance.
     let hub_home = tempfile::tempdir().expect("hub home tempdir");
     let hub_zunel_home = hub_home.path().to_path_buf();
     onboard(&hub_zunel_home);
@@ -234,7 +234,7 @@ async fn hub_profile_loads_helper_profile_as_mcp_server_and_round_trips_tool_cal
         "expected non-error tool result, got: {result:?}"
     );
     assert!(
-        result.content.contains("served-from-helper-profile"),
+        result.content.contains("served-from-helper-instance"),
         "expected helper-marker contents in tool output, got: {}",
         result.content
     );
@@ -259,7 +259,7 @@ async fn hub_profile_loads_helper_profile_as_mcp_server_and_round_trips_tool_cal
 /// which would otherwise look like a valid header value to a less
 /// strict server and leak the placeholder syntax.
 #[tokio::test]
-async fn hub_profile_skips_helper_when_required_env_var_missing() {
+async fn hub_instance_skips_helper_when_required_env_var_missing() {
     // See the `_env_guard` comment in the round-trip test above for
     // why this lock is mandatory.
     let _env_guard = env_lock().lock().await;
@@ -346,6 +346,6 @@ async fn helper_initialize_returns_zunel_agent_server_name() {
         .expect("server name string");
     assert!(
         name.starts_with("zunel-agent:"),
-        "expected zunel-agent:<profile> identity, got {name}"
+        "expected zunel-agent:<instance> identity, got {name}"
     );
 }

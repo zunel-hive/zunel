@@ -1,12 +1,12 @@
-//! `zunel mcp agent`: serve the active profile's tool registry as a
+//! `zunel mcp agent`: serve the active instance's tool registry as a
 //! Streamable HTTP/HTTPS MCP server.
 //!
 //! This command is the user-facing entry point for the
-//! "profile-as-MCP-server" feature. It:
+//! "instance-as-MCP-server" feature. It:
 //!
-//! 1. resolves the named profile's `Config` (the `--profile` global
+//! 1. resolves the named instance's `Config` (the `--instance` global
 //!    flag flows through env into [`zunel_config::load_config`]);
-//! 2. builds the default [`ToolRegistry`] for that profile,
+//! 2. builds the default [`ToolRegistry`] for that instance,
 //!    optionally subset-ing it via `--allow-write`/`--allow-exec`/
 //!    `--allow-web`;
 //! 3. wraps the registry in a [`RegistryDispatcher`];
@@ -66,7 +66,7 @@ pub(super) async fn run(args: McpAgentArgs, config_path: Option<&Path>) -> Resul
     let api_keys = collect_api_keys(&args)?;
     enforce_loopback_guard(parsed_addr.ip(), &args, &api_keys)?;
 
-    let profile = zunel_config::active_profile_name();
+    let instance = zunel_config::active_instance_name();
 
     // `--print-config` exits before the registry is built or any
     // socket is bound. We've already done flag-shape validation
@@ -76,7 +76,7 @@ pub(super) async fn run(args: McpAgentArgs, config_path: Option<&Path>) -> Resul
     // can preview a snippet without having certs in place yet.
     // Stdout stays JSON-only; banners/warnings live on stderr.
     if args.print_config {
-        let snippet = build_agent_config_snippet(&args, parsed_addr, &api_keys, &profile)?;
+        let snippet = build_agent_config_snippet(&args, parsed_addr, &api_keys, &instance)?;
         println!("{}", serde_json::to_string_pretty(&snippet)?);
         return Ok(());
     }
@@ -177,10 +177,10 @@ pub(super) async fn run(args: McpAgentArgs, config_path: Option<&Path>) -> Resul
         cancel_registry = Some(registry_arc);
     }
     let identity = DispatcherIdentity {
-        server_name: format!("zunel-agent:{profile}"),
+        server_name: format!("zunel-agent:{instance}"),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
     };
-    let session_key = format!("mcp-agent:{profile}");
+    let session_key = format!("mcp-agent:{instance}");
     let context = ToolContext::new_with_workspace(workspace.clone(), session_key);
     let mut dispatcher = RegistryDispatcher::new(identity, registry, context);
     if let Some(reg) = cancel_registry {
@@ -188,7 +188,7 @@ pub(super) async fn run(args: McpAgentArgs, config_path: Option<&Path>) -> Resul
     }
 
     eprintln!(
-        "zunel mcp agent: serving {} tool(s) for profile {profile} (workspace: {})",
+        "zunel mcp agent: serving {} tool(s) for instance {instance} (workspace: {})",
         dispatcher.tools_for_banner(),
         workspace.display()
     );
@@ -233,7 +233,7 @@ fn parse_byte_count(raw: &str) -> Result<usize> {
 
 /// Construct the `tools.mcpServers.<name>` snippet emitted by
 /// `--print-config`. The shape mirrors the smoke test's hand-rolled
-/// config so a copy-paste of this output into another profile's
+/// config so a copy-paste of this output into another instance's
 /// `config.json` is a working hub registration.
 ///
 /// Secrets policy: when `api_keys` is non-empty we always emit a
@@ -245,12 +245,12 @@ fn build_agent_config_snippet(
     args: &McpAgentArgs,
     bind: SocketAddr,
     api_keys: &[String],
-    profile: &str,
+    instance: &str,
 ) -> Result<Value> {
     let entry_name = args
         .public_name
         .clone()
-        .unwrap_or_else(|| profile.to_string());
+        .unwrap_or_else(|| instance.to_string());
     let scheme = if args.https_cert.is_some() && args.https_key.is_some() {
         "https"
     } else {
@@ -269,7 +269,7 @@ fn build_agent_config_snippet(
         let env_name = args
             .public_env
             .clone()
-            .unwrap_or_else(|| default_token_env_name(profile));
+            .unwrap_or_else(|| default_token_env_name(instance));
         validate_env_var_name(&env_name)?;
         entry["headers"] = json!({
             "Authorization": format!("Bearer ${{{env_name}}}"),
@@ -306,12 +306,12 @@ fn format_public_url(scheme: &str, addr: SocketAddr) -> String {
 }
 
 /// Default env-var name for the bearer-token placeholder. Mirrors the
-/// `ZUNEL_<PROFILE>_TOKEN` pattern documented in `self-tool.md` and
+/// `ZUNEL_<INSTANCE>_TOKEN` pattern documented in `self-tool.md` and
 /// used by the smoke tests, with non-alphanumerics folded to `_` so
-/// profile names like `helper-1` become `ZUNEL_HELPER_1_TOKEN`.
-fn default_token_env_name(profile: &str) -> String {
-    let mut cleaned = String::with_capacity(profile.len());
-    for ch in profile.chars() {
+/// instance names like `helper-1` become `ZUNEL_HELPER_1_TOKEN`.
+fn default_token_env_name(instance: &str) -> String {
+    let mut cleaned = String::with_capacity(instance.len());
+    for ch in instance.chars() {
         if ch.is_ascii_alphanumeric() {
             cleaned.push(ch.to_ascii_uppercase());
         } else {
@@ -319,7 +319,7 @@ fn default_token_env_name(profile: &str) -> String {
         }
     }
     if cleaned.is_empty() {
-        cleaned.push_str("PROFILE");
+        cleaned.push_str("INSTANCE");
     }
     format!("ZUNEL_{cleaned}_TOKEN")
 }
@@ -348,7 +348,7 @@ fn validate_env_var_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Build the registry for the agent server. Starts from the profile's
+/// Build the registry for the agent server. Starts from the instance's
 /// default registry and prunes anything outside the requested gate set.
 /// `mcp_*` tools are always pruned: the depth-forwarding plumbing is in
 /// place, but the design doc defers MCP-of-MCP re-export pending product
@@ -376,7 +376,7 @@ async fn build_filtered_registry(
     for name in raw.names().map(str::to_string).collect::<Vec<_>>() {
         if name.starts_with("mcp_") {
             // Re-enabling this is a one-line change once the product
-            // questions captured in `profile-as-mcp.md` (Limitations
+            // questions captured in `instance-as-mcp.md` (Limitations
             // §1) are answered. The runtime-side guard rails (depth
             // header forwarding, origin allowlist, depth cap) are
             // already in place.
@@ -468,7 +468,7 @@ mod tests {
     /// Helper: build an `McpAgentArgs` from the same argv shape the
     /// CLI parser sees, so test cases stay close to the real command
     /// line. We embed the args in a tiny driver struct because
-    /// `McpAgentArgs` itself doesn't carry the global `--profile`/etc.
+    /// `McpAgentArgs` itself doesn't carry the global `--instance`/etc.
     /// surface clap expects at the top level.
     #[derive(Parser, Debug)]
     struct Driver {
@@ -574,11 +574,11 @@ mod tests {
     }
 
     #[test]
-    fn default_token_env_normalizes_profile_chars() {
+    fn default_token_env_normalizes_instance_chars() {
         assert_eq!(default_token_env_name("default"), "ZUNEL_DEFAULT_TOKEN");
         assert_eq!(default_token_env_name("helper-1"), "ZUNEL_HELPER_1_TOKEN");
         assert_eq!(default_token_env_name("a.b/c"), "ZUNEL_A_B_C_TOKEN");
-        assert_eq!(default_token_env_name(""), "ZUNEL_PROFILE_TOKEN");
+        assert_eq!(default_token_env_name(""), "ZUNEL_INSTANCE_TOKEN");
     }
 
     #[test]

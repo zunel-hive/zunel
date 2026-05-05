@@ -9,7 +9,7 @@ These flags work on every subcommand:
 | Flag | Description |
 |------|-------------|
 | `--config <path>` | Override the config file path. Defaults to `~/.zunel/config.json`. Also readable from the `ZUNEL_CONFIG` environment variable; the flag wins when both are set. See [Overriding the config path](configuration.md#overriding-the-config-path) |
-| `-p <name>` / `--profile <name>` | Switch to the `~/.zunel/profiles/<name>/` home dir for this invocation. Ignored when `ZUNEL_HOME` is set. See [Profiles](#profiles) |
+| `-i <name>` / `--instance <name>` | Switch to the `~/.zunel/instances/<name>/` home dir for this invocation. Ignored when `ZUNEL_HOME` is set. See [Instances](#instances) |
 | `--i-know-what-im-doing` | Bypass the [workspace foot-gun guard](#workspace-foot-gun-guard) for this invocation. Equivalent to setting `ZUNEL_ALLOW_UNSAFE_WORKSPACE=1`. |
 
 ## Core Commands
@@ -29,11 +29,11 @@ These flags work on every subcommand:
 | `zunel channels status` | Show channel status |
 | `zunel mcp serve` | Run the built-in **zunel-self** MCP server over stdio |
 | `zunel mcp serve --server slack` | Run the built-in Slack MCP server over stdio. Exposes the read tools (`slack_whoami`, `slack_channel_history`, `slack_channel_replies`, `slack_search_messages`/`_users`/`_files`/`_channels`, `slack_list_users`, `slack_user_info`, `slack_permalink`, `slack_read_canvas`) plus the user-token write tools (`slack_post_as_me`, `slack_dm_self`, `slack_schedule_message`, `slack_create_canvas`, `slack_update_canvas`). `slack_channel_history` and `slack_channel_replies` accept a user ID (`U…`/`W…`) and auto-open the DM via `conversations.open`, so you can read DM history without first looking up a `D…` channel. Set `channels.slack.userTokenReadOnly = true` in `config.json` to hide and refuse the write tools. |
-| `zunel mcp login <server>` | OAuth-login to a configured remote MCP server and cache its access token under `~/.zunel/mcp-oauth/<server>/token.json`. Same flow can also be driven from chat — the agent calls `mcp_login_start` / `mcp_login_complete` against the live profile when the user asks to log in or after an `MCP_AUTH_REQUIRED:` error. See [Logging in to a remote MCP server from chat](configuration.md#logging-in-to-a-remote-mcp-server-from-chat) in `configuration.md`. |
+| `zunel mcp login <server>` | OAuth-login to a configured remote MCP server and cache its access token under `~/.zunel/mcp-oauth/<server>/token.json`. Same flow can also be driven from chat — the agent calls `mcp_login_start` / `mcp_login_complete` against the live instance when the user asks to log in or after an `MCP_AUTH_REQUIRED:` error. See [Logging in to a remote MCP server from chat](configuration.md#logging-in-to-a-remote-mcp-server-from-chat) in `configuration.md`. |
 | `zunel mcp login <server> --force` | Re-run the remote MCP OAuth flow even if a cached token already exists |
-| `zunel [--profile NAME] mcp agent --bind 127.0.0.1:0` | Serve the active profile's tool registry as a Streamable HTTP/HTTPS MCP server. Read-only by default; opt in with `--allow-write`, `--allow-exec`, `--allow-web`. Pair `--https-cert/--https-key` with `--api-key` (or `--api-key-file`) for non-loopback binds. Tune `--max-call-depth` and `--max-body-bytes` (`K`/`M`/`G` suffixes) for nested-MCP / abuse limits. `--access-log <path>` emits one JSON line per served request (`-` for stdout; otherwise append-mode file, logrotate-friendly; bearer tokens redacted to a 4-byte fingerprint). Cooperates with SIGINT/SIGTERM (5s drain). See [`profile-as-mcp.md`](profile-as-mcp.md). |
-| `zunel [--profile NAME] mcp agent --mode2` | Additionally register `helper_ask` (Mode 2 — agent-loop-as-tool). Each call runs a fresh `AgentLoop` inside this profile and returns its final answer plus an MCP `_meta` block carrying the helper session id, `tools_used`, and `Usage` figures. Tune approvals via `--mode2-approval reject\|allow_all` (default `reject`; no human is in the helper-side loop) and cap iterations via `--mode2-max-iterations`. Caller-supplied `session_id` args are namespaced with the matched API-key fingerprint as `mode2:<fingerprint>:<id>` so two unrelated callers can't collide. See [`profile-as-mcp-mode2.md`](profile-as-mcp-mode2.md). |
-| `zunel [--profile NAME] mcp agent --print-config` | Emit a paste-ready `tools.mcpServers.<name>` JSON snippet for the active profile and exit without binding. Embeds a `Bearer ${ZUNEL_<PROFILE>_TOKEN}` placeholder when `--api-key`/`--api-key-file` is set (never the literal key). Use `--public-url` to override the URL (e.g., for binds behind a load balancer), `--public-env` to rename the bearer-token env var, and `--public-name` to rename the `mcpServers` entry. |
+| `zunel [--instance NAME] mcp agent --bind 127.0.0.1:0` | Serve the active instance's tool registry as a Streamable HTTP/HTTPS MCP server. Read-only by default; opt in with `--allow-write`, `--allow-exec`, `--allow-web`. Pair `--https-cert/--https-key` with `--api-key` (or `--api-key-file`) for non-loopback binds. Tune `--max-call-depth` and `--max-body-bytes` (`K`/`M`/`G` suffixes) for nested-MCP / abuse limits. `--access-log <path>` emits one JSON line per served request (`-` for stdout; otherwise append-mode file, logrotate-friendly; bearer tokens redacted to a 4-byte fingerprint). Cooperates with SIGINT/SIGTERM (5s drain). See [`instance-as-mcp.md`](instance-as-mcp.md). |
+| `zunel [--instance NAME] mcp agent --mode2` | Additionally register `helper_ask` (Mode 2 — agent-loop-as-tool). Each call runs a fresh `AgentLoop` inside this instance and returns its final answer plus an MCP `_meta` block carrying the helper session id, `tools_used`, and `Usage` figures. Tune approvals via `--mode2-approval reject\|allow_all` (default `reject`; no human is in the helper-side loop) and cap iterations via `--mode2-max-iterations`. Caller-supplied `session_id` args are namespaced with the matched API-key fingerprint as `mode2:<fingerprint>:<id>` so two unrelated callers can't collide. See [`instance-as-mcp-mode2.md`](instance-as-mcp-mode2.md). |
+| `zunel [--instance NAME] mcp agent --print-config` | Emit a paste-ready `tools.mcpServers.<name>` JSON snippet for the active instance and exit without binding. Embeds a `Bearer ${ZUNEL_<INSTANCE>_TOKEN}` placeholder when `--api-key`/`--api-key-file` is set (never the literal key). Use `--public-url` to override the URL (e.g., for binds behind a load balancer), `--public-env` to rename the bearer-token env var, and `--public-name` to rename the `mcpServers` entry. |
 | `zunel slack login` | OAuth to mint a Slack **user** token (`xoxp-…`) for the read-only Slack MCP. Opens your browser, terminates the callback on a local HTTPS loopback server, and writes the token to `~/.zunel/slack-app-mcp/user_token.json` (0600). TLS cert is auto-loaded from `~/.zunel/oauth-callback/{cert,key}.pem` when present, otherwise a per-run self-signed cert is generated (browser will warn once). See [Slack user MCP (read as you)](configuration.md#slack-user-mcp-read-as-you) in `configuration.md` for the `mkcert` setup that eliminates the warning, plus full Slack-app registration steps and troubleshooting. Uses the dedicated MCP vendor app at `~/.zunel/slack-app-mcp/` (separate from the DM-bot app). |
 | `zunel slack login --force` | Re-run the flow even if a user token is already cached. Useful after `chat.postMessage` (or any Slack API call) returns `token_expired (refresh failed: invalid_refresh_token; …)` — the cached refresh token has aged out beyond Slack's rotation window and only an interactive re-login can mint a new pair. |
 | `zunel slack login --scopes <list>` | Override the default user scope set. Defaults include the read scopes (`channels:history`, `groups:history`, `im:history`, `mpim:history`, `search:read.{im,mpim,private,public,users,files}`, `users:read`, `users:read.email`) **and** the write scopes (`chat:write`, `im:write`, `files:write`). The write scopes are gated at runtime by `channels.slack.userTokenReadOnly` and `channels.slack.writeAllow`, so a fresh re-login still produces a token whose actual reach matches the safety knobs in `config.json`. Pass an explicit `--scopes` list (e.g. omit `chat:write,im:write,files:write`) to mint a token whose Slack-side capability is read-only by construction. |
@@ -98,32 +98,46 @@ The footer printed live by `zunel agent --show-tokens` reuses the same
 formatter, so the per-turn line you see in the terminal matches what
 `zunel tokens show <key>` records on disk.
 
-## Profiles
+## Instances
 
-Profiles are side-by-side zunel instances that live in their own home
+Instances are side-by-side zunel installs that live in their own home
 directories. Use them to run separate dev / prod / experiment sandboxes
 without their configs, sessions, or OAuth tokens colliding.
 
 | Command | Description |
 |---------|-------------|
-| `zunel --profile <name> ...` | Run any subcommand with `<name>`'s home dir (`~/.zunel/profiles/<name>/`). Short form: `-p <name>`. |
-| `ZUNEL_HOME=/path/to/dir zunel ...` | Run a single command with an arbitrary home directory (highest priority — beats `--profile` and the sticky default). |
-| `zunel profile list` | Show all discovered profiles and which one is active. |
-| `zunel profile use <name>` | Set `<name>` as the sticky default; future `zunel ...` calls without `--profile` use that profile. Writes to `~/.zunel/active_profile`. |
-| `zunel profile use default` | Clear the sticky default and go back to `~/.zunel/`. |
-| `zunel profile rm <name>` | Delete `~/.zunel/profiles/<name>/` (asks to confirm; refuses to delete the active profile). Pass `--force` to skip the prompt. |
-| `zunel profile show` | Print the active profile name and resolved `ZUNEL_HOME`. |
+| `zunel --instance <name> ...` | Run any subcommand with `<name>`'s home dir (`~/.zunel/instances/<name>/`). Short form: `-i <name>`. |
+| `ZUNEL_HOME=/path/to/dir zunel ...` | Run a single command with an arbitrary home directory (highest priority — beats `--instance` and the sticky default). |
+| `zunel instance list` | Show all discovered instances and which one is active. |
+| `zunel instance use <name>` | Set `<name>` as the sticky default; future `zunel ...` calls without `--instance` use that instance. Writes to `~/.zunel/active_instance`. |
+| `zunel instance use default` | Clear the sticky default and go back to `~/.zunel/`. |
+| `zunel instance rm <name>` | Delete `~/.zunel/instances/<name>/` (asks to confirm; refuses to delete the active instance). Pass `--force` to skip the prompt. |
+| `zunel instance show` | Print the active instance name and resolved `ZUNEL_HOME`. |
 
-The reserved profile name `default` always maps to `~/.zunel/`. All other
-names map to `~/.zunel/profiles/<name>/`. Names containing whitespace,
+The reserved instance name `default` always maps to `~/.zunel/`. All other
+names map to `~/.zunel/instances/<name>/`. Names containing whitespace,
 path separators, or `..` are rejected.
 
 Resolution order (highest priority first):
 
 1. `ZUNEL_HOME` environment variable.
-2. `--profile`/`-p` CLI flag.
-3. Sticky default in `~/.zunel/active_profile`.
+2. `--instance`/`-i` CLI flag.
+3. Sticky default in `~/.zunel/active_instance`.
 4. The default home `~/.zunel/`.
+
+### Migrating from `profile`
+
+Earlier zunel builds used `--profile` and `~/.zunel/profiles/`. The CLI
+now refuses to run while the legacy directory is present and prints the
+exact `mv` command to migrate. The typical fix:
+
+```bash
+mv ~/.zunel/profiles ~/.zunel/instances
+mv ~/.zunel/active_profile ~/.zunel/active_instance   # if it exists
+```
+
+Update any shell aliases or service unit files from `--profile` /
+`zunel profile` to `--instance` / `zunel instance`.
 
 ## Workspace foot-gun guard
 
@@ -145,9 +159,9 @@ matches any of:
 | `workspace` contains the resolved `~/.zunel/` (or equals it) | The agent loop could mutate its own config, sessions, or token cache. |
 
 Read-only commands (`zunel status`, `zunel sessions list/show`,
-`zunel tokens *`, `zunel channels status`, `zunel profile *`,
+`zunel tokens *`, `zunel channels status`, `zunel instance *`,
 `zunel mcp tools list`) skip the guard so you can use them to
-debug a misconfigured profile.
+debug a misconfigured instance.
 
 ### Escape hatches
 

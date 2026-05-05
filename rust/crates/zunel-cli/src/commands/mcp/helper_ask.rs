@@ -1,7 +1,7 @@
 //! `helper_ask` — Mode 2's "agent-loop-as-tool" surface.
 //!
 //! Registered on `zunel mcp agent` only when `--mode2` is set. The
-//! tool runs a fresh [`AgentLoop`] inside the helper profile per call
+//! tool runs a fresh [`AgentLoop`] inside the helper instance per call
 //! and returns the final assistant text plus a structured `_meta`
 //! block (helper session id, iteration count, tools used, usage).
 //!
@@ -12,7 +12,7 @@
 //!   * per-call `max_iterations` arg capped against the CLI ceiling.
 //!
 //! Streaming, approval-forwarding, and per-call timeouts are deferred —
-//! see [`docs/profile-as-mcp-mode2.md`](../../../../../../../docs/profile-as-mcp-mode2.md).
+//! see [`docs/instance-as-mcp-mode2.md`](../../../../../../../docs/instance-as-mcp-mode2.md).
 //!
 //! ## Threading model
 //!
@@ -220,7 +220,7 @@ impl Tool for HelperAskTool {
 
     fn description(&self) -> &'static str {
         "Ask the helper agent to handle a prompt with its own LLM and tool registry. \
-         Each call runs a fresh AgentLoop inside the helper profile and returns its \
+         Each call runs a fresh AgentLoop inside the helper instance and returns its \
          final answer."
     }
 
@@ -462,7 +462,7 @@ impl Tool for HelperAskTool {
         drop(cancel_guard);
 
         // Build the structured `_meta` payload. The shape mirrors
-        // `docs/profile-as-mcp-mode2.md` so callers that already
+        // `docs/instance-as-mcp-mode2.md` so callers that already
         // parse it can rely on the field set.
         let mut meta = json!({
             "session_id": session_id,
@@ -498,7 +498,7 @@ impl Tool for HelperAskTool {
 /// colliding on the same caller-supplied session key; the
 /// fresh-per-call default avoids accidentally appending unrelated
 /// turns to whatever session-id the model happened to invent. Both
-/// behaviours match the spec in `docs/profile-as-mcp-mode2.md` Q4.
+/// behaviours match the spec in `docs/instance-as-mcp-mode2.md` Q4.
 fn build_namespaced_session_id(
     caller_fingerprint: Option<&str>,
     caller_supplied: Option<&str>,

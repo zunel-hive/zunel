@@ -1,4 +1,4 @@
-# Profile-as-MCP-Server: Mode 2 — Agent-Loop-as-Tool
+# Instance-as-MCP-Server: Mode 2 — Agent-Loop-as-Tool
 
 **Status:** Second slice implemented. `zunel mcp agent --mode2` registers
 `helper_ask` (always) plus `helper_pending_approvals` /  `helper_approve`
@@ -22,13 +22,13 @@
   `helper_approve` and an in-process queue, with a per-approval
   wallclock ceiling (`--mode2-approval-timeout-secs`, default 300s).
 
-Background context: [`profile-as-mcp.md`](./profile-as-mcp.md) (Mode 1) and the
+Background context: [`instance-as-mcp.md`](./instance-as-mcp.md) (Mode 1) and the
 `AgentLoop` / `SessionManager` / `ApprovalHandler` machinery in
 `zunel-core`.
 
 ## Motivation
 
-Mode 1 lets a hub agent call helper-profile **tools**. The hub is still the
+Mode 1 lets a hub agent call helper-instance **tools**. The hub is still the
 brain: it sees `mcp_research_read_file`, `mcp_research_grep`, etc. and drives
 its own LLM loop to use them. That's the right primitive for "borrow a
 helper's filesystem / OAuth tokens / auth scopes," but it puts the entire
@@ -37,7 +37,7 @@ LLM-orchestration burden on the hub. Three real workflows fall outside it:
 1. **"Ask the research helper to draft a literature review"** — the helper
    should run its own loop with its own model, tools, and prompt; the hub
    just wants the answer.
-2. **Specialization by profile** — different profiles legitimately want
+2. **Specialization by instance** — different instances legitimately want
    different system prompts, model picks, max-iteration ceilings, and
    approval policies. Mode 1 erases that by making the hub drive the loop.
 3. **Auditability of cross-agent work** — when the hub sends a request to
@@ -45,7 +45,7 @@ LLM-orchestration burden on the hub. Three real workflows fall outside it:
    what happened. Mode 1 leaves no trace beyond raw tool calls.
 
 Mode 2 introduces a single tool, `helper_ask`, that runs a full `AgentLoop`
-inside the helper profile and returns the answer. Conceptually it's "RPC
+inside the helper instance and returns the answer. Conceptually it's "RPC
 over MCP into another agent."
 
 ## What slice 1 ships
@@ -97,7 +97,7 @@ nice-to-have for v2; not blocking initial release.
 
 ### 2. Approvals
 
-The helper profile may have `approval_required = true` for tools the hub's
+The helper instance may have `approval_required = true` for tools the hub's
 prompt indirectly causes. Two reasonable policies:
 
 - **`reject`** — any tool that needs approval inside `helper_ask` causes
@@ -141,7 +141,7 @@ options:
 - **Stateless.** No session is created; each call is independent. Mode 1's
   current behavior. Loses cross-call memory; doesn't pollute the helper's
   session log.
-- **One session per hub profile.** The session key is derived from the
+- **One session per hub instance.** The session key is derived from the
   caller's identity (e.g., the API key used to authenticate). The helper
   has one persistent thread per upstream consumer. Good audit, but
   identity → session mapping is a new concept.
@@ -191,7 +191,7 @@ account, its quotas). Two things matter:
 
 ### 7. Tool surface inside the helper
 
-When `helper_ask` runs inside the helper profile, what tools does the
+When `helper_ask` runs inside the helper instance, what tools does the
 helper see during that loop?
 
 - **Helper's full registry, modulo Mode 1's gates.** I.e., the same
@@ -210,7 +210,7 @@ not to, run two agent processes — they're cheap.
 ### CLI
 
 ```text
-zunel [--profile NAME] mcp agent [TRANSPORT] [AUTH] [DEPTH] [LIMITS] [TOOL GATES] [MODE 2]
+zunel [--instance NAME] mcp agent [TRANSPORT] [AUTH] [DEPTH] [LIMITS] [TOOL GATES] [MODE 2]
 
 MODE 2 (all opt-in)
   --mode2                          Enable helper_ask. Off by default; opting
@@ -385,7 +385,7 @@ These keep the diff bounded; each is a follow-up:
    questions. v2 is request-reply only.
 6. **Cross-process session sharing.** Each helper still has its own
    `SessionManager` rooted in its own `ZUNEL_HOME`. Two helper processes
-   on the same profile would race; v2 keeps the "one server per profile
+   on the same instance would race; v2 keeps the "one server per instance
    per host" rule from Mode 1.
 
 ## Risks worth flagging up front

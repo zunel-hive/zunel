@@ -69,7 +69,7 @@ async fn spawn_agent(extra_args: &[&str]) -> AgentServer {
     let stdout = child.stdout.take().expect("stdout pipe");
     let mut lines = BufReader::new(stdout).lines();
     // Find the listening banner; older lines may carry the warmup
-    // logs if a profile-level event is emitted before the listener
+    // logs if an instance-level event is emitted before the listener
     // banner.
     let mut url = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -345,7 +345,7 @@ async fn agent_dispatches_read_file_tool_call_against_workspace() {
 }
 
 #[tokio::test]
-async fn agent_initialize_reports_profile_in_server_name() {
+async fn agent_initialize_reports_instance_in_server_name() {
     let server = spawn_agent(&[]).await;
     let client = reqwest::Client::new();
     let response = post_json(
@@ -362,7 +362,7 @@ async fn agent_initialize_reports_profile_in_server_name() {
         .expect("server name");
     assert!(
         name.starts_with("zunel-agent:"),
-        "expected zunel-agent:<profile>, got {name}"
+        "expected zunel-agent:<instance>, got {name}"
     );
 }
 
@@ -469,11 +469,11 @@ async fn agent_shuts_down_cleanly_on_sigterm() {
 }
 
 /// `--print-config` is the operator-facing helper for the
-/// profile-as-MCP-server feature: it emits a paste-ready
-/// `tools.mcpServers.<name>` JSON snippet for the active profile.
+/// instance-as-MCP-server feature: it emits a paste-ready
+/// `tools.mcpServers.<name>` JSON snippet for the active instance.
 /// We invoke the real binary, parse stdout as JSON, and assert on
 /// shape so a regression in the helper would be caught here rather
-/// than via the (more expensive) cross-profile smoke test.
+/// than via the (more expensive) cross-instance smoke test.
 fn run_print_config(args: &[&str]) -> Value {
     let (home, _workspace) = fresh_home();
     let zunel_home = home.path().to_path_buf();
@@ -497,8 +497,8 @@ fn run_print_config(args: &[&str]) -> Value {
 }
 
 #[test]
-fn print_config_default_profile_loopback_has_no_headers() {
-    // We pin `--public-name` because the test profile's actual name
+fn print_config_default_instance_loopback_has_no_headers() {
+    // We pin `--public-name` because the test instance's actual name
     // is derived from a randomized tempdir, which would otherwise
     // make the assertion path non-deterministic.
     let snippet = run_print_config(&["--bind", "127.0.0.1:9090", "--public-name", "helper"]);

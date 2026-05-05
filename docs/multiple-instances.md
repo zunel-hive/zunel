@@ -3,40 +3,40 @@
 Run multiple Zunel instances with separate configs, workspaces, cron state, and
 Slack credentials.
 
-This is useful when you want to keep a local CLI profile separate from one or
+This is useful when you want to keep a local CLI instance separate from one or
 more long-running Slack gateways.
 
-The main switch is `--profile` or `ZUNEL_HOME`. Each profile maps to a distinct
+The main switch is `--instance` or `ZUNEL_HOME`. Each instance maps to a distinct
 home directory with its own `config.json`, workspace, OAuth tokens, cron data,
 and Slack settings.
 
 ## Quick Start
 
-Initialize a few isolated profiles:
+Initialize a few isolated instances:
 
 ```bash
-zunel --profile local onboard
-zunel --profile slack onboard
-zunel --profile staging onboard
+zunel --instance local onboard
+zunel --instance slack onboard
+zunel --instance staging onboard
 ```
 
 Typical roles:
 
-- `~/.zunel/profiles/local/` for local CLI work
-- `~/.zunel/profiles/slack/` for your primary Slack gateway
-- `~/.zunel/profiles/staging/` for a second gateway, test endpoint, or alternate model
+- `~/.zunel/instances/local/` for local CLI work
+- `~/.zunel/instances/slack/` for your primary Slack gateway
+- `~/.zunel/instances/staging/` for a second gateway, test endpoint, or alternate model
 
 ## Run Instances
 
 ```bash
-# Local-only CLI profile
-zunel --profile local agent
+# Local-only CLI instance
+zunel --instance local agent
 
 # Main Slack gateway
-zunel --profile slack gateway
+zunel --instance slack gateway
 
 # Second gateway against a different workspace / Slack app
-zunel --profile staging gateway
+zunel --instance staging gateway
 ```
 
 `zunel agent` always starts a local agent loop. It does not attach to a running
@@ -46,11 +46,11 @@ gateway process.
 
 | Component | Resolved from | Example |
 |-----------|---------------|---------|
-| Home | `--profile` or `ZUNEL_HOME` | `~/.zunel/profiles/slack/` |
-| Config | home directory | `~/.zunel/profiles/slack/config.json` |
-| Workspace | `agents.defaults.workspace` | `~/.zunel/profiles/slack/workspace/` |
-| Cron data | workspace directory | `~/.zunel/profiles/slack/workspace/cron/` |
-| Media/runtime state | home directory | `~/.zunel/profiles/slack/media/` |
+| Home | `--instance` or `ZUNEL_HOME` | `~/.zunel/instances/slack/` |
+| Config | home directory | `~/.zunel/instances/slack/config.json` |
+| Workspace | `agents.defaults.workspace` | `~/.zunel/instances/slack/workspace/` |
+| Cron data | workspace directory | `~/.zunel/instances/slack/workspace/cron/` |
+| Media/runtime state | home directory | `~/.zunel/instances/slack/media/` |
 
 ## Minimal Per-Instance Config
 
@@ -60,7 +60,7 @@ Each instance can point to a different model, endpoint, workspace, or Slack app:
 {
   "agents": {
     "defaults": {
-      "workspace": "~/.zunel/profiles/slack/workspace",
+      "workspace": "~/.zunel/instances/slack/workspace",
       "provider": "custom",
       "model": "gpt-4o-mini"
     }
@@ -94,7 +94,7 @@ ZUNEL_HOME=/tmp/zunel-staging-test zunel gateway
 ```
 
 To change only the workspace while keeping the same home, edit
-`agents.defaults.workspace` in that profile's `config.json`.
+`agents.defaults.workspace` in that instance's `config.json`.
 
 ## Common Uses
 
@@ -111,3 +111,17 @@ To change only the workspace while keeping the same home, edit
 - Empty Slack `allowFrom` lists deny access; use explicit IDs or `["*"]`.
 - The gateway does not bind a port. If you need a liveness check, use your
   process supervisor (systemd, Docker, launchd).
+
+## Migrating from `profile`
+
+If you upgraded from a build that used `--profile`, your data lives at
+`~/.zunel/profiles/<name>/`. The new resolver refuses to start while the legacy
+directory is present and prints the exact `mv` command to run. For most setups:
+
+```bash
+mv ~/.zunel/profiles ~/.zunel/instances
+mv ~/.zunel/active_profile ~/.zunel/active_instance   # if it exists
+```
+
+After the rename, switch any shell aliases or service unit files from
+`--profile` / `zunel profile` to `--instance` / `zunel instance`.

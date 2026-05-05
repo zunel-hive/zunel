@@ -153,10 +153,10 @@ zunel slack login              # mint a Slack user token for the Slack MCP
 zunel mcp serve --server self  # run the built-in self MCP server over stdio
 zunel mcp serve --server slack # run the built-in Slack MCP server over stdio
 zunel mcp login <server>       # OAuth-login a configured remote MCP server
-zunel profile list             # list side-by-side profiles
-zunel profile use <name>       # set a profile as the sticky default
-zunel profile show             # show the active profile and home dir
-zunel profile rm <name>        # delete a profile (asks to confirm)
+zunel instance list            # list side-by-side instances
+zunel instance use <name>      # set an instance as the sticky default
+zunel instance show            # show the active instance and home dir
+zunel instance rm <name>       # delete an instance (asks to confirm)
 ```
 
 ### Global flags
@@ -164,7 +164,7 @@ zunel profile rm <name>        # delete a profile (asks to confirm)
 | Flag | Description |
 |------|-------------|
 | `--config <path>` | Override the config file path. Also readable from the `ZUNEL_CONFIG` environment variable; the flag wins when both are set |
-| `-p <name>` / `--profile <name>` | Run any subcommand under `~/.zunel/profiles/<name>/` (ignored when `ZUNEL_HOME` is set) |
+| `-i <name>` / `--instance <name>` | Run any subcommand under `~/.zunel/instances/<name>/` (ignored when `ZUNEL_HOME` is set) |
 
 See `docs/cli-reference.md` for the full per-subcommand options table.
 

@@ -1,4 +1,4 @@
-# Profile-as-MCP-Server
+# Instance-as-MCP-Server
 
 **Status:** implemented (`zunel mcp agent`). Mode 2 (agent-loop-as-tool) is a
 draft design only — see [Limitations](#limitations). Outbound
@@ -7,12 +7,12 @@ nested chains are bounded end-to-end.
 
 ## Goal
 
-Let any zunel profile expose itself to other agents (zunel or otherwise) as a
+Let any zunel instance expose itself to other agents (zunel or otherwise) as a
 standard MCP server, so a "named agent" becomes a first-class, isolated unit
 of compute the rest of the system can talk to over a normal MCP connection.
 
-The most common shape: a default-profile agent calls one or more **helper
-profiles** (research, code-review, refactor, summarizer, etc.) by listing them
+The most common shape: a default-instance agent calls one or more **helper
+instances** (research, code-review, refactor, summarizer, etc.) by listing them
 under `tools.mcpServers` in its `config.json`, exactly the way it would wire
 in a third-party MCP server today.
 
@@ -21,27 +21,27 @@ in a third-party MCP server today.
 These are explicitly deferred and will get their own design notes:
 
 - **Mode 2: agent-loop-as-tool** — a single `helper_ask({prompt})` tool that
-  runs a full `AgentLoop` inside the helper profile. Powerful but introduces
+  runs a full `AgentLoop` inside the helper instance. Powerful but introduces
   product questions (streaming, approvals, cancellation, session persistence,
   per-call iteration ceilings) that aren't worth tangling with v1. Drafted in
-  [`profile-as-mcp-mode2.md`](./profile-as-mcp-mode2.md).
-- Cross-profile **session sharing** (one logical session served by multiple
-  profiles).
-- A discovery / registry mechanism. v1 wires profiles by hand in `config.json`.
+  [`instance-as-mcp-mode2.md`](./instance-as-mcp-mode2.md).
+- Cross-instance **session sharing** (one logical session served by multiple
+  instances).
+- A discovery / registry mechanism. v1 wires instances by hand in `config.json`.
 - Web UI / dashboard.
 
 ## In one sentence
 
-`zunel mcp agent --profile NAME` boots a Streamable-HTTP MCP server that
-exposes profile NAME's full default tool registry, defaulting to loopback +
-read-only, so the default profile (or any MCP client) can connect to it as a
+`zunel mcp agent --instance NAME` boots a Streamable-HTTP MCP server that
+exposes instance NAME's full default tool registry, defaulting to loopback +
+read-only, so the default instance (or any MCP client) can connect to it as a
 normal MCP server.
 
 ## What it exposes
 
 The `build_default_registry_async(&cfg, &workspace)` output for the chosen
-profile, served over the existing `zunel-mcp-self` HTTP/HTTPS code path. That
-means the helper profile's:
+instance, served over the existing `zunel-mcp-self` HTTP/HTTPS code path. That
+means the helper instance's:
 
 - filesystem tools (subject to its `PathPolicy`)
 - search tools (`glob`, `grep`)
@@ -57,7 +57,7 @@ that's Mode 2.
 ## CLI surface
 
 ```text
-zunel [--profile NAME] mcp agent [TRANSPORT] [AUTH] [ORIGIN] [DEPTH] [TOOL GATES]
+zunel [--instance NAME] mcp agent [TRANSPORT] [AUTH] [ORIGIN] [DEPTH] [TOOL GATES]
 
 TRANSPORT
   --bind <addr>           Default 127.0.0.1:0. Streamable HTTP/HTTPS only;
@@ -102,7 +102,7 @@ TOOL GATES (disabled by default; opt-in per category)
   --allow-web             Expose web_search, web_fetch.
 ```
 
-The active profile is selected via the global `--profile NAME` flag (same
+The active instance is selected via the global `--instance NAME` flag (same
 plumbing as every other `zunel` subcommand), which sets `ZUNEL_HOME` for the
 duration of the process. The agent server then loads that home's `config.json`
 and workspace exactly like `zunel agent` does.
@@ -122,11 +122,11 @@ the trust model is "another process is calling me over the wire" rather than
 | Web tools | enabled if `tools.web.enable` | **disabled** (need `--allow-web`) |
 | Read / search / `cron_*` (read) | enabled | enabled |
 | `mcp_*` fan-outs | enabled | **disabled** (see Limitations) |
-| Workspace policy | `PathPolicy::restricted(workspace)` | unchanged (still rooted at the profile's workspace) |
+| Workspace policy | `PathPolicy::restricted(workspace)` | unchanged (still rooted at the instance's workspace) |
 
 The opt-in flags are checked **before** mutating the registry returned by
 `build_default_registry_async`, so a misconfigured `tools.exec.enable=true`
-in the helper profile's `config.json` is **not** sufficient to expose `exec`
+in the helper instance's `config.json` is **not** sufficient to expose `exec`
 over MCP. Both must agree.
 
 `cron` is a single tool with both read and write sub-actions, so it is
@@ -249,10 +249,10 @@ warning to stderr and keeps serving. Logging is observability, not load-bearing.
 
 ## Worked example
 
-Helper profile (`research`) is started under launchd / systemd:
+Helper instance (`research`) is started under launchd / systemd:
 
 ```text
-zunel --profile research mcp agent \
+zunel --instance research mcp agent \
   --bind 127.0.0.1:8443 \
   --https-cert /etc/zunel/research/cert.pem \
   --https-key  /etc/zunel/research/key.pem \
@@ -269,7 +269,7 @@ zunel --profile research mcp agent \
 2026-03-14-prod-token
 ```
 
-Default profile's `config.json` wires it in like any other MCP server, with a
+Default instance's `config.json` wires it in like any other MCP server, with a
 secret pulled from the environment so it never appears in the file:
 
 ```jsonc
@@ -289,7 +289,7 @@ secret pulled from the environment so it never appears in the file:
 ```
 
 The default agent now sees `mcp_research_*` tools alongside everything else,
-each scoped to the research profile's workspace, OAuth tokens, and config.
+each scoped to the research instance's workspace, OAuth tokens, and config.
 
 ## Generating the snippet automatically
 
@@ -301,7 +301,7 @@ short-circuits before TLS file I/O and the loopback guard so you can preview
 a snippet for a config you haven't fully provisioned yet.
 
 ```text
-zunel --profile research mcp agent \
+zunel --instance research mcp agent \
   --bind 127.0.0.1:8443 \
   --https-cert /etc/zunel/research/cert.pem \
   --https-key  /etc/zunel/research/key.pem \
@@ -313,7 +313,7 @@ zunel --profile research mcp agent \
 The output looks like the worked example above. Two key properties:
 
 - **Secrets stay out.** Even though the command sees the API keys, the snippet
-  always emits `Bearer ${ZUNEL_<PROFILE>_TOKEN}` (or whatever you pass to
+  always emits `Bearer ${ZUNEL_<INSTANCE>_TOKEN}` (or whatever you pass to
   `--public-env`), never the literal token. `--print-config > snippet.json` is
   safe to commit to the same repo as the rest of your zunel config.
 - **Wildcard binds and `:0` ports become placeholders.** `0.0.0.0` / `::`
@@ -327,9 +327,9 @@ Optional knobs:
 
 | Flag | Purpose |
 |---|---|
-| `--public-name <name>` | Override the `mcpServers` entry key (defaults to the active profile name). Useful when two helper profiles share a name across hosts. |
+| `--public-name <name>` | Override the `mcpServers` entry key (defaults to the active instance name). Useful when two helper instances share a name across hosts. |
 | `--public-url <url>`   | Override the URL emitted in the snippet. Required for wildcard binds you want to expose under a stable hostname. |
-| `--public-env <VAR>`   | Override the env-var name in the `Authorization` placeholder. Handy when the consumer profile's deployment already standardizes on something other than `ZUNEL_<PROFILE>_TOKEN`. |
+| `--public-env <VAR>`   | Override the env-var name in the `Authorization` placeholder. Handy when the consumer instance's deployment already standardizes on something other than `ZUNEL_<INSTANCE>_TOKEN`. |
 
 ## Implementation notes
 
@@ -344,13 +344,13 @@ Optional knobs:
   and `zunel_cli::commands::mcp::registry_dispatcher::RegistryDispatcher`
   (used by `zunel mcp agent`).
 - **Registry source of truth.** `zunel_core::build_default_registry_async`
-  stays the single place that decides what tools a profile gets. The new
+  stays the single place that decides what tools an instance gets. The new
   command applies the `--allow-*` filters on top, then hands the resulting
   registry to the HTTP server.
 - **Subagent / spawn.** The `SpawnTool` is registered by `zunel agent`,
   not `build_default_registry_async`, so the agent server inherits the right
   behavior for free: no nested LLM loops are exposed.
-- **One server per profile per host.** Two simultaneous `zunel mcp agent`
+- **One server per instance per host.** Two simultaneous `zunel mcp agent`
   invocations on the same machine and same port fail loudly at `bind()`.
   No advisory lockfile.
 - **Lazy startup is out of scope.** Each helper is a long-running process. If
@@ -364,20 +364,20 @@ These are deliberate cuts; each is tracked as a follow-up:
 1. **No `mcp_*` re-export.** The exposed registry strips any tool whose
    name starts with `mcp_`. The depth-forwarding plumbing is in place
    (depth flows through `DispatchMeta` → `ToolContext::incoming_call_depth` →
-   `RemoteMcpClient::call_tool_with_depth`), but cross-profile fanout raises
+   `RemoteMcpClient::call_tool_with_depth`), but cross-instance fanout raises
    product questions (per-call timeouts, OAuth token visibility, audit) that
    need a design pass before being exposed on the wire. Re-enabling the prefix
    is a one-line change in `agent::build_filtered_registry` once that design
    lands.
 2. **No agent-loop-as-tool ("Mode 2").** A single `helper_ask({prompt})` tool
-   that runs a full `AgentLoop` inside the helper profile. The design is
-   drafted in [`profile-as-mcp-mode2.md`](./profile-as-mcp-mode2.md) and
+   that runs a full `AgentLoop` inside the helper instance. The design is
+   drafted in [`instance-as-mcp-mode2.md`](./instance-as-mcp-mode2.md) and
    covers streaming, approvals, cancellation, session persistence, and
    per-call iteration ceilings; this surface deliberately leaves room for it
    but does not implement it.
 3. ~~**No "refuse to start" workspace check.**~~ **Implemented.** The
    guard now refuses to start when the resolved workspace is `/`,
-   `$HOME`, or an ancestor of the profile's `~/.zunel/` (which would
+   `$HOME`, or an ancestor of the instance's `~/.zunel/` (which would
    let the agent loop mutate its own config/sessions). The
    non-loopback git-repo `warning:` from §SECURITY GUARDRAILS still
    fires because that's a soft heuristic about exposing real working
@@ -389,7 +389,7 @@ These are deliberate cuts; each is tracked as a follow-up:
 4. **No richer audit format beyond `--access-log`.** The current JSON-lines
    schema covers per-request basics; multi-tenant operators who need
    additional fields should open an issue describing the schema they need.
-5. **No discovery.** Each consumer profile wires helpers by hand in
+5. **No discovery.** Each consumer instance wires helpers by hand in
    `config.json`. A directory-style registry is out of scope.
 
 ## Out-of-scope reminders
@@ -397,6 +397,6 @@ These are deliberate cuts; each is tracked as a follow-up:
 - **No agent-as-tool today.** If someone asks "can I just send a prompt and
   let the helper figure it out", the answer is "not yet — wire the tools and
   let your local LLM drive the loop, or wait for Mode 2."
-- **No multi-profile shared sessions.** Each helper has its own
+- **No multi-instance shared sessions.** Each helper has its own
   `SessionManager`, scoped to its own `ZUNEL_HOME`.
 - **No discovery.** Hand-edit `config.json`.

@@ -3,10 +3,10 @@
 **Status:** Approved 2026-05-04. Ready for implementation plan.
 
 **Companion docs:**
-- [`docs/profile-as-mcp-mode2.md`](../../profile-as-mcp-mode2.md) — slice-1 doc that
+- [`docs/instance-as-mcp-mode2.md`](../../instance-as-mcp-mode2.md) — slice-1 doc that
   defines what's already shipped and which open questions slice 2 is asked
   to close.
-- [`docs/profile-as-mcp.md`](../../profile-as-mcp.md) — Mode 1 (filtered tool
+- [`docs/instance-as-mcp.md`](../../instance-as-mcp.md) — Mode 1 (filtered tool
   registry passthrough) which Mode 2 layers on top of.
 
 ## Goal
@@ -44,7 +44,7 @@ These remain explicitly deferred (to slice 3 or later):
 - Persistent token / cost budgets across calls.
 - Multi-helper composition tests (helper A invokes `helper_ask` on helper B).
   Cancellation forwarding through that chain is out of scope.
-- Cross-process session sharing. The "one server per profile per host"
+- Cross-process session sharing. The "one server per instance per host"
   rule from slice 1 still applies.
 
 ## Architecture
@@ -304,7 +304,7 @@ impl ApprovalHandler for ForwardingApprovalHandler {
 1. **Hub LLM has to know to poll.** If the hub agent's prompt doesn't
    teach it to call `helper_pending_approvals` after kicking off a
    `helper_ask`, the helper will time out. We document this prominently
-   in `docs/profile-as-mcp-mode2.md`.
+   in `docs/instance-as-mcp-mode2.md`.
 2. **Streaming hint is best-effort.** When streaming is on, the helper
    emits a `[awaiting approval] tool=… request_id=…` progress event so a
    streaming hub agent has an explicit signal. Non-streaming hubs only
@@ -437,7 +437,7 @@ hub                                                     helper
 
 | Risk | Mitigation |
 |---|---|
-| **Hub agent doesn't poll for approvals.** Helper times out, call fails. | Document the polling pattern in `profile-as-mcp-mode2.md`. Streaming hint nudges streaming hubs. Operator can fall back to `--mode2-approval reject\|allow_all`. |
+| **Hub agent doesn't poll for approvals.** Helper times out, call fails. | Document the polling pattern in `instance-as-mcp-mode2.md`. Streaming hint nudges streaming hubs. Operator can fall back to `--mode2-approval reject\|allow_all`. |
 | **Slow client blocks the agent loop via channel back-pressure.** | Bounded channel (size 64) makes this self-limiting. The watchdog timeout (`--mode2-call-timeout-secs`) is a hard ceiling. |
 | **Cancel races with completion.** Hub sends cancel just as the helper finishes. | The cancel registry's `cancel` method returns `bool`; if the entry was already removed, the notification is a no-op. The hub gets a normal final result frame either way. |
 | **`system_prompt` injection.** A compromised hub could inject prompts that leak helper internals. | 8 KiB cap. Operator opt-out (`--mode2-disable-system-prompt`). The doc already flags "treat helper APIs as untrusted input"; this just adds a new vector with the same mitigation discipline. |

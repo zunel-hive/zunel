@@ -18,7 +18,7 @@ pub fn zunel_home() -> Result<PathBuf> {
     if let Some(val) = std::env::var_os("ZUNEL_HOME") {
         return Ok(PathBuf::from(val));
     }
-    crate::profile::active_profile_home()
+    crate::instance::active_instance_home()
 }
 
 /// Default config file path: `<zunel_home>/config.json`.
@@ -87,7 +87,7 @@ pub fn cli_history_path() -> Result<PathBuf> {
 ///    zunel home. This catches the "I pointed workspace at
 ///    `~/.zunel` itself" mistake and the broader case where
 ///    workspace contains the sessions/config tree (which would
-///    let an agent self-modify its own profile).
+///    let an agent self-modify its own instance).
 ///
 /// Escape hatch: setting [`UNSAFE_WORKSPACE_ENV`] to any
 /// non-empty value short-circuits the guard. The CLI exposes the

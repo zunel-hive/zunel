@@ -97,7 +97,7 @@ docker run -v ~/.zunel:/home/zunel/.zunel --rm zunel status
 running gateway are:
 
 - the **Slack channel** configured under `channels.slack` (if enabled)
-- the **`zunel` CLI** on the same host against the same `--profile` or
+- the **`zunel` CLI** on the same host against the same `--instance` or
   `ZUNEL_HOME`
 
 There is no HTTP server, health endpoint, or webhook listener. If you need a

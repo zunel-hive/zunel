@@ -13,14 +13,14 @@ pub struct Cli {
     #[arg(long, global = true, env = "ZUNEL_CONFIG")]
     pub config: Option<PathBuf>,
 
-    /// Use a named profile home under ~/.zunel/profiles/ (ignored when ZUNEL_HOME is set).
-    #[arg(short = 'p', long, global = true)]
-    pub profile: Option<String>,
+    /// Use a named instance home under ~/.zunel/instances/ (ignored when ZUNEL_HOME is set).
+    #[arg(short = 'i', long, global = true)]
+    pub instance: Option<String>,
 
     /// Bypass the workspace foot-gun guard. Without this, `zunel`
     /// refuses to start the agent (or onboard) when the resolved
     /// workspace is the filesystem root, the user's `$HOME`, or
-    /// an ancestor of the active profile's `~/.zunel` directory —
+    /// an ancestor of the active instance's `~/.zunel` directory —
     /// any of which would let `write_file`/`exec`/etc. punch
     /// through the workspace sandbox.
     ///
@@ -45,8 +45,8 @@ pub enum Command {
     Status,
     /// MCP helper commands.
     Mcp(McpArgs),
-    /// Manage side-by-side zunel profiles.
-    Profile(ProfileArgs),
+    /// Manage side-by-side zunel instances.
+    Instance(InstanceArgs),
     /// Slack user-token helper commands.
     Slack(SlackArgs),
     /// Inspect configured gateway channels.
@@ -112,10 +112,10 @@ pub enum McpCommand {
     Serve(McpServeArgs),
     /// Authenticate a configured remote MCP server.
     Login(McpLoginArgs),
-    /// Serve the active profile's tool registry as a Streamable
+    /// Serve the active instance's tool registry as a Streamable
     /// HTTP/HTTPS MCP server.
     ///
-    /// Use the global `--profile NAME` flag to choose which profile's
+    /// Use the global `--instance NAME` flag to choose which instance's
     /// configuration and workspace to expose. Defaults bind to
     /// loopback only; expose on a non-loopback address only when
     /// pairing `--https-cert/--https-key` with `--api-key` (or
@@ -193,7 +193,7 @@ pub struct McpAgentArgs {
     /// timestamp, peer addr, JSON-RPC method, tool name (when
     /// applicable), `Mcp-Call-Depth`, the matched bearer token's
     /// fingerprint (never the token itself), HTTP status, and
-    /// wall-clock latency. See `docs/profile-as-mcp.md` for the
+    /// wall-clock latency. See `docs/instance-as-mcp.md` for the
     /// full schema.
     #[arg(long = "access-log")]
     pub access_log: Option<String>,
@@ -212,9 +212,9 @@ pub struct McpAgentArgs {
     pub allow_web: bool,
 
     /// Enable Mode 2 (`helper_ask`) — register a single tool that
-    /// runs a full `AgentLoop` inside this profile and returns the
+    /// runs a full `AgentLoop` inside this instance and returns the
     /// answer. Off by default; Mode 1's filtered registry stays
-    /// unchanged. See `docs/profile-as-mcp-mode2.md`.
+    /// unchanged. See `docs/instance-as-mcp-mode2.md`.
     #[arg(long = "mode2")]
     pub mode2: bool,
 
@@ -273,7 +273,7 @@ pub struct McpAgentArgs {
     pub mode2_call_timeout_secs: Option<u64>,
 
     /// Print a paste-ready `tools.mcpServers.<name>` snippet for this
-    /// profile to stdout and exit without binding the socket. The
+    /// instance to stdout and exit without binding the socket. The
     /// snippet uses an `${ENV}` reference for the bearer token rather
     /// than the literal key so secrets never end up on disk via
     /// shell-redirected output.
@@ -287,13 +287,13 @@ pub struct McpAgentArgs {
     pub public_url: Option<String>,
 
     /// Override the env-var name embedded in the `--print-config`
-    /// `Authorization` header. Defaults to `ZUNEL_<PROFILE>_TOKEN`.
+    /// `Authorization` header. Defaults to `ZUNEL_<INSTANCE>_TOKEN`.
     #[arg(long = "public-env", requires = "print_config")]
     pub public_env: Option<String>,
 
     /// Override the `mcpServers` key in `--print-config` output.
-    /// Defaults to the active profile name. Use this when two profiles
-    /// share a profile name and would otherwise collide on the hub.
+    /// Defaults to the active instance name. Use this when two instances
+    /// share an instance name and would otherwise collide on the hub.
     #[arg(long = "public-name", requires = "print_config")]
     pub public_name: Option<String>,
 }
@@ -314,30 +314,30 @@ pub struct McpLoginArgs {
 }
 
 #[derive(Debug, Parser)]
-pub struct ProfileArgs {
+pub struct InstanceArgs {
     #[command(subcommand)]
-    pub command: ProfileCommand,
+    pub command: InstanceCommand,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ProfileCommand {
-    /// List discovered profiles.
+pub enum InstanceCommand {
+    /// List discovered instances.
     List,
-    /// Set the sticky default profile.
-    Use(ProfileUseArgs),
-    /// Remove a profile directory.
-    Rm(ProfileRmArgs),
-    /// Show the active profile and home.
+    /// Set the sticky default instance.
+    Use(InstanceUseArgs),
+    /// Remove an instance directory.
+    Rm(InstanceRmArgs),
+    /// Show the active instance and home.
     Show,
 }
 
 #[derive(Debug, Parser)]
-pub struct ProfileUseArgs {
+pub struct InstanceUseArgs {
     pub name: String,
 }
 
 #[derive(Debug, Parser)]
-pub struct ProfileRmArgs {
+pub struct InstanceRmArgs {
     pub name: String,
     /// Skip confirmation.
     #[arg(long, short = 'f')]
