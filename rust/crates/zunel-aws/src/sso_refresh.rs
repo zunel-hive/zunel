@@ -273,10 +273,20 @@ pub async fn refresh_profile_if_near_expiry(
 /// which the gateway loop logs and retries next tick.
 fn classify_failure(profile: &str, exit_code: i32, stderr: String) -> RefreshError {
     let s = stderr.to_lowercase();
-    if s.contains("token has expired")
+    // The first three substrings cover AWS CLI v2.0–v2.12 phrasings.
+    // The fourth is the v2.13+ message
+    // ("The SSO session associated with this profile has expired or
+    // is otherwise invalid."), where "session" and "has expired"
+    // are no longer adjacent so the literal "session has expired"
+    // miss it. We require both `sso session` and an
+    // expired/invalid keyword to keep this conjunctive enough to
+    // avoid false positives on unrelated AWS errors that happen to
+    // mention "expired" or "invalid".
+    let sso_session_dead = s.contains("token has expired")
         || s.contains("session has expired")
         || s.contains("session has been invalidated")
-    {
+        || (s.contains("sso session") && (s.contains("expired") || s.contains("invalid")));
+    if sso_session_dead {
         return RefreshError::SsoSessionExpired {
             profile: profile.to_string(),
             stderr,
@@ -308,6 +318,38 @@ mod tests {
             "dev",
             255,
             "Token has expired and refresh failed".to_string(),
+        );
+        assert!(matches!(err, RefreshError::SsoSessionExpired { .. }));
+    }
+
+    /// AWS CLI v2.13+ wording for the same condition on a legacy
+    /// `sso_start_url` profile: the words "session" and "has expired"
+    /// are not adjacent (`associated with this profile` sits between
+    /// them), so the older substrings never match. Pin this here so
+    /// the gateway's per-profile WARN log surfaces the actionable
+    /// "re-run aws sso login --profile X" message instead of falling
+    /// through to the generic `AwsCommandFailed` branch.
+    #[test]
+    fn classify_failure_recognises_session_associated_with_profile_expired() {
+        let stderr = "The SSO session associated with this profile has expired or is \
+             otherwise invalid. To refresh this SSO session run aws sso login with the \
+             corresponding profile.";
+        let err = classify_failure("da-prod", 255, stderr.to_string());
+        assert!(
+            matches!(err, RefreshError::SsoSessionExpired { ref profile, .. } if profile == "da-prod"),
+            "expected SsoSessionExpired, got {err:?}"
+        );
+    }
+
+    /// Sibling: same v2.13+ phrasing path with "is otherwise invalid"
+    /// only — covers the case where AWS CLI rotates wording slightly
+    /// but keeps the "sso session ... invalid" structure.
+    #[test]
+    fn classify_failure_recognises_sso_session_otherwise_invalid() {
+        let err = classify_failure(
+            "dev",
+            255,
+            "The SSO session associated with this profile is otherwise invalid.".to_string(),
         );
         assert!(matches!(err, RefreshError::SsoSessionExpired { .. }));
     }
