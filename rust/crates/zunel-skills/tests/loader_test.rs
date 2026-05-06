@@ -10,6 +10,19 @@ fn write_skill(dir: &std::path::Path, name: &str, contents: &str) {
     fs::write(skill_dir.join("SKILL.md"), contents).unwrap();
 }
 
+/// Names of every embedded builtin shipped under `builtins/`. Tests
+/// that assert on exact skill counts or names need to silence these
+/// so the assertions stay focused on user-supplied skills.
+fn all_embedded_builtins() -> Vec<String> {
+    vec!["mcp-oauth-login".to_string(), "gitlab-mr-write".to_string()]
+}
+
+fn disabled_with_builtins(extra: &[&str]) -> Vec<String> {
+    let mut v = all_embedded_builtins();
+    v.extend(extra.iter().map(|s| (*s).to_string()));
+    v
+}
+
 #[test]
 fn lists_user_skills_from_workspace() {
     let tmp = tempdir().unwrap();
@@ -19,7 +32,7 @@ fn lists_user_skills_from_workspace() {
         "---\ndescription: Says hi.\n---\n\nHello world.\n",
     );
     // Disable embedded builtins so this test is purely about user skills.
-    let loader = SkillsLoader::new(tmp.path(), None, &["mcp-oauth-login".to_string()]);
+    let loader = SkillsLoader::new(tmp.path(), None, &all_embedded_builtins());
     let skills = loader.list_skills(true).unwrap();
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "greet");
@@ -42,11 +55,7 @@ fn builtin_skills_are_loaded_after_user_skills_and_deduplicated() {
     );
     write_skill(builtin.path(), "wave", "---\ndescription: Wave.\n---\n\n");
 
-    let loader = SkillsLoader::new(
-        ws.path(),
-        Some(builtin.path()),
-        &["mcp-oauth-login".to_string()],
-    );
+    let loader = SkillsLoader::new(ws.path(), Some(builtin.path()), &all_embedded_builtins());
     let skills = loader.list_skills(true).unwrap();
     let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, vec!["greet", "wave"]);
@@ -93,7 +102,9 @@ fn load_skills_for_context_concatenates_with_delimiter() {
 fn build_skills_summary_uses_expected_format() {
     let tmp = tempdir().unwrap();
     write_skill(tmp.path(), "hello", "---\ndescription: Hi.\n---\n\n");
-    let loader = SkillsLoader::new(tmp.path(), None, &[]);
+    // Silence embedded builtins so the assertion is anchored on our
+    // user-supplied skill regardless of alphabetical interleaving.
+    let loader = SkillsLoader::new(tmp.path(), None, &all_embedded_builtins());
     let summary = loader.build_skills_summary(None).unwrap();
     assert!(summary.starts_with("- **hello** — Hi."));
     assert!(summary.contains("`"));
@@ -104,11 +115,7 @@ fn disabled_skills_are_omitted() {
     let tmp = tempdir().unwrap();
     write_skill(tmp.path(), "keep", "---\ndescription: K.\n---\n\n");
     write_skill(tmp.path(), "skip", "---\ndescription: S.\n---\n\n");
-    let loader = SkillsLoader::new(
-        tmp.path(),
-        None,
-        &["skip".to_string(), "mcp-oauth-login".to_string()],
-    );
+    let loader = SkillsLoader::new(tmp.path(), None, &disabled_with_builtins(&["skip"]));
     let names: Vec<String> = loader
         .list_skills(true)
         .unwrap()
@@ -150,6 +157,49 @@ fn embedded_builtin_mcp_oauth_login_is_visible() {
     assert!(
         body.contains("mcp_login_start"),
         "body must reference the tool"
+    );
+}
+
+#[test]
+fn embedded_builtin_gitlab_mr_write_is_visible_and_gated_on_glab() {
+    // The crate ships `builtins/gitlab-mr-write/SKILL.md`. It must be
+    // listed (regardless of availability) and its body must mention the
+    // `glab` CLI so the agent knows what tool to shell out to. The
+    // skill is gated on `glab` being installed via `requires.bins`, so
+    // its `available` flag depends on the test runner's PATH; we don't
+    // assert on it here.
+    let tmp = tempdir().unwrap();
+    let loader = SkillsLoader::new(tmp.path(), None, &[]);
+    let skills = loader.list_skills(false).unwrap();
+    let gitlab = skills
+        .iter()
+        .find(|s| s.name == "gitlab-mr-write")
+        .expect("embedded gitlab-mr-write skill should be listed");
+    assert!(
+        gitlab
+            .path
+            .display()
+            .to_string()
+            .contains(EMBEDDED_BUILTIN_LABEL),
+        "embedded skills should label themselves as builtin: {}",
+        gitlab.path.display()
+    );
+    assert_eq!(
+        gitlab.parsed_metadata.bins,
+        vec!["glab".to_string()],
+        "gitlab-mr-write must self-disable when `glab` is missing"
+    );
+    let body = loader
+        .load_skill("gitlab-mr-write")
+        .unwrap()
+        .expect("should resolve embedded skill body");
+    assert!(
+        body.contains("glab mr approve"),
+        "body must teach the approve command"
+    );
+    assert!(
+        body.contains("discussions"),
+        "body must teach the threaded-reply API"
     );
 }
 

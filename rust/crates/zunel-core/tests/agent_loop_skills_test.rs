@@ -175,8 +175,9 @@ async fn process_streamed_does_not_inject_system_message_without_loader() {
 async fn process_streamed_skips_system_message_when_loader_empty() {
     let (loop_, captured, tmp) = make_loop_without_skills();
     // Empty workspace (no skills/) + disable the bundled builtins so
-    // both the always-blob and the summary collapse to "".
-    let disabled = vec!["mcp-oauth-login".to_string()];
+    // both the always-blob and the summary collapse to "". Keep this
+    // list in sync with `crates/zunel-skills/builtins/`.
+    let disabled = vec!["mcp-oauth-login".to_string(), "gitlab-mr-write".to_string()];
     let loader = SkillsLoader::new(tmp.path(), None, &disabled);
     let loop_ = loop_.with_skills(loader);
 

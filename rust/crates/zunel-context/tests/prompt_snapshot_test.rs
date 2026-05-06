@@ -30,8 +30,13 @@ fn system_prompt_matches_python_fixture() {
 
     // Disable embedded builtins so the snapshot only reflects the
     // workspace fixture — matching how the Python fixture was generated
-    // with `BUILTIN_SKILLS_DIR` redirected to a non-existent path.
-    let loader = SkillsLoader::new(&canonical_workspace, None, &["mcp-oauth-login".to_string()]);
+    // with `BUILTIN_SKILLS_DIR` redirected to a non-existent path. Keep
+    // this list in sync with `crates/zunel-skills/builtins/`.
+    let loader = SkillsLoader::new(
+        &canonical_workspace,
+        None,
+        &["mcp-oauth-login".to_string(), "gitlab-mr-write".to_string()],
+    );
     let builder = ContextBuilder::new(canonical_workspace.clone(), loader)
         .with_runtime("macOS arm64, Python 3.13.5");
     let raw = builder.build_system_prompt(Some("cli")).unwrap();
